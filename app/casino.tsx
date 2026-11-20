@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useAccount, useConnect, useDisconnect, usePublicClient, useWalletClient } from 'wagmi';
+import { useAccount, useConnect, useDisconnect, usePublicClient, useSwitchChain, useWalletClient } from 'wagmi';
 import { parseEther, formatEther } from 'viem';
+import { sepolia } from 'viem/chains';
 import tokenAbi from '../abi/CasinoToken.json';
 import treasuryAbi from '../abi/Treasury.json';
 import flipAbi from '../abi/CoinFlip.json';
@@ -34,9 +35,20 @@ const S = {
 };
 
 export default function Casino() {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, chainId } = useAccount();
   const { connect, connectors, error: connectError, isPending } = useConnect();
   const { disconnect } = useDisconnect();
+  const { switchChain, isPending: isSwitching } = useSwitchChain();
+  const wrongChain = isConnected && chainId !== sepolia.id;
+
+  // Wallet connects on whatever chain it was left on (often mainnet).
+  // Auto-switch to Sepolia so writes don't fail the chain check.
+  useEffect(() => {
+    if (wrongChain) {
+      switchChain({ chainId: sepolia.id });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wrongChain]);
   const publicClient = usePublicClient();
   const { data: wallet } = useWalletClient();
   const [tab, setTab] = useState<Tab>('flip');
@@ -80,6 +92,11 @@ export default function Casino() {
 
   const approve = async () => {
     if (!wallet) return;
+    if (wrongChain) {
+      setMsg('switching to Sepolia first…');
+      switchChain({ chainId: sepolia.id });
+      return;
+    }
     setMsg('approving treasury…');
     const hash = await wallet.writeContract({
       address: T, abi: tokenAbi, functionName: 'approve',
@@ -99,6 +116,11 @@ export default function Casino() {
 
   const play = async () => {
     if (!wallet) return;
+    if (wrongChain) {
+      setMsg('switching to Sepolia first…');
+      switchChain({ chainId: sepolia.id });
+      return;
+    }
     setMsg('');
     try {
       const w = parseEther(wager);
@@ -160,6 +182,14 @@ export default function Casino() {
         {connectors.map((c: any) => <span key={c.uid} style={{ marginRight: 8 }}>{c.name} ({c.id})</span>)}
       </div>
       {connectError && <div style={{ color: '#ff9', marginTop: 8 }}>connect failed: {connectError.message} — install MetaMask and try again in the same browser.</div>}
+      {wrongChain && (
+        <div style={{ background: '#4a2b00', border: '1px solid #b97a1a', padding: 12, borderRadius: 10, marginTop: 12 }}>
+          ⚠️ Wallet is on chain {chainId} (mainnet) — this casino runs on <b>Sepolia</b>.{' '}
+          <button style={S.btn} disabled={isSwitching} onClick={() => switchChain({ chainId: sepolia.id })}>
+            {isSwitching ? 'switching…' : 'Switch to Sepolia'}
+          </button>
+        </div>
+      )}
       <div style={S.muted}>bankroll: {fmt(bankroll)} ZSK · testnet randomness — mainnet needs VRF</div>
       <div style={S.tabs}>
         {(['flip', 'dice', 'plinko', 'history'] as Tab[]).map((t) => (
@@ -186,8 +216,8 @@ export default function Casino() {
           {tab === 'flip' && <div style={S.muted}>pays 1.96x (2% edge)</div>}
           {tab === 'plinko' && <div style={S.muted}>pays by bin table, up to 16x on 16 rows</div>}
           <div style={S.row}>
-            {needApprove && isConnected && <button style={S.btn} onClick={approve}>1️⃣ approve treasury</button>}
-            <button style={S.btn} disabled={!isConnected || pending !== null} onClick={play}>
+            {needApprove && isConnected && !wrongChain && <button style={S.btn} onClick={approve}>1️⃣ approve treasury</button>}
+            <button style={S.btn} disabled={!isConnected || pending !== null || wrongChain} onClick={play}>
               {pending ? 'resolving…' : needApprove ? '2️⃣ bet (after approve)' : 'bet'}
             </button>
           </div>
