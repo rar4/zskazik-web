@@ -12,11 +12,11 @@ const wcProjectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || '';
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [config] = useState(() => {
-    const connectors: any[] = [
-      injected(),
-      // OKX Wallet (EIP-6963 id "okx-wallet") — shows up when OKX extension is present
-      (injected as any)({ id: 'okx-wallet', name: 'OKX Wallet', target: { id: 'okx-wallet' } }),
-    ];
+    // Single injected connector. With multiInjectedProviderDiscovery,
+    // OKX Wallet shows up automatically as its own EIP-6963 connector
+    // (id "okx-wallet") — a second fake injected() wrapper around the
+    // same provider made connect() race and surface a phantom error.
+    const connectors: any[] = [injected({ shimDisconnect: true })];
     if (wcProjectId) connectors.push(walletConnect({ projectId: wcProjectId }));
     return createConfig({
       chains: [sepolia],

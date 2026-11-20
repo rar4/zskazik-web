@@ -36,10 +36,18 @@ const S = {
 
 export default function Casino() {
   const { address, isConnected, chainId } = useAccount();
-  const { connect, connectors, error: connectError, isPending } = useConnect();
+  const { connect, connectors, error: connectError, isPending, reset: resetConnect } = useConnect();
   const { disconnect } = useDisconnect();
   const { switchChain, isPending: isSwitching } = useSwitchChain();
   const wrongChain = isConnected && chainId !== sepolia.id;
+
+  // wagmi keeps the last connect error even after a retry succeeds —
+  // clear it as soon as we're connected so a stale "connect failed"
+  // banner doesn't show next to a working session.
+  useEffect(() => {
+    if (isConnected) resetConnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConnected]);
 
   // Wallet connects on whatever chain it was left on (often mainnet).
   // Auto-switch to Sepolia so writes don't fail the chain check.
@@ -98,9 +106,11 @@ export default function Casino() {
       return;
     }
     setMsg('approving treasury…');
+    // Exact amount, not 2^256-1: OKX Wallet (and most wallets) block
+    // unlimited ERC20 approvals as a security risk.
     const hash = await wallet.writeContract({
       address: T, abi: tokenAbi, functionName: 'approve',
-      args: [TR, BigInt('0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')],
+      args: [TR, parseEther(wager || '0')],
     } as any);
     await publicClient!.waitForTransactionReceipt({ hash });
     setMsg('approved ✓ now place your bet');
@@ -181,7 +191,7 @@ export default function Casino() {
       <div style={S.muted}>
         {connectors.map((c: any) => <span key={c.uid} style={{ marginRight: 8 }}>{c.name} ({c.id})</span>)}
       </div>
-      {connectError && <div style={{ color: '#ff9', marginTop: 8 }}>connect failed: {connectError.message} — install MetaMask and try again in the same browser.</div>}
+      {connectError && !isConnected && <div style={{ color: '#ff9', marginTop: 8 }}>connect failed: {connectError.message} — install MetaMask and try again in the same browser.</div>}
       {wrongChain && (
         <div style={{ background: '#4a2b00', border: '1px solid #b97a1a', padding: 12, borderRadius: 10, marginTop: 12 }}>
           ⚠️ Wallet is on chain {chainId} (mainnet) — this casino runs on <b>Sepolia</b>.{' '}
@@ -217,8 +227,8 @@ export default function Casino() {
           {tab === 'plinko' && <div style={S.muted}>pays by bin table, up to 16x on 16 rows</div>}
           <div style={S.row}>
             {needApprove && isConnected && !wrongChain && <button style={S.btn} onClick={approve}>1️⃣ approve treasury</button>}
-            <button style={S.btn} disabled={!isConnected || pending !== null || wrongChain} onClick={play}>
-              {pending ? 'resolving…' : needApprove ? '2️⃣ bet (after approve)' : 'bet'}
+            <button style={S.btn} disabled={!isConnected || pending !== null || wrongChain || needApprove} onClick={play}>
+              {pending ? 'resolving…' : needApprove ? 'approve first ↑' : 'bet'}
             </button>
           </div>
           {msg && <div style={{ marginTop: 8 }}>{msg}</div>}
