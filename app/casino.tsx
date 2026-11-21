@@ -148,6 +148,8 @@ export default function Casino() {
   const publicClientRef = useRef(publicClient);
   publicClientRef.current = publicClient;
 
+  const betsRef = useRef<Bet[]>([]);
+  const bankrollRef = useRef('0');
   const load = async () => {
     const pc = publicClientRef.current;
     if (!pc || !address) return;
@@ -158,12 +160,21 @@ export default function Casino() {
     try {
       const r = await fetch(`/api/bankroll`);
       const j = await r.json();
-      if (j.bankroll) setBankroll(j.bankroll);
+      if (j.bankroll && j.bankroll !== bankrollRef.current) {
+        bankrollRef.current = j.bankroll;
+        setBankroll(j.bankroll);
+      }
     } catch {}
     try {
       const r = await fetch(`/api/bets?player=${address}&limit=20`);
-      const data = await r.json().catch(() => []);
-      setBets(Array.isArray(data) ? data : []);
+      const data = await r.json().catch(() => null);
+      // Only replace state when the data actually changed - replacing the
+      // array every 6s re-renders every row and makes history flicker.
+      // On fetch failure keep the old list (never flash "no bets yet").
+      if (Array.isArray(data) && JSON.stringify(data) !== JSON.stringify(betsRef.current)) {
+        betsRef.current = data;
+        setBets(data);
+      }
     } catch {}
   };
   useEffect(() => {
