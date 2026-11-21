@@ -151,6 +151,9 @@ export default function Casino() {
 
   const betsRef = useRef<Bet[]>([]);
   const bankrollRef = useRef('0');
+  // Persisted history: cached per player in localStorage so a refresh shows
+  // the full history instantly, then the chain scan refreshes it in place.
+  const cacheKey = address ? `zskazik-bets-${address.toLowerCase()}` : null;
   const load = async () => {
     const pc = publicClientRef.current;
     if (!pc || !address) return;
@@ -175,6 +178,8 @@ export default function Casino() {
       if (Array.isArray(data) && JSON.stringify(data) !== JSON.stringify(betsRef.current)) {
         betsRef.current = data;
         setBets(data);
+        // Persist to localStorage so history survives refresh.
+        try { if (cacheKey) localStorage.setItem(cacheKey, JSON.stringify(data)); } catch {}
       }
       setBetsLoaded(true);
     } catch {
@@ -182,8 +187,19 @@ export default function Casino() {
     }
   };
   useEffect(() => {
-    setBetsLoaded(false);
-    betsRef.current = [];
+    // Show stored history instantly on refresh, then sync from chain.
+    try {
+      const cached = cacheKey ? localStorage.getItem(cacheKey) : null;
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length) {
+          betsRef.current = parsed;
+          setBets(parsed);
+          setBetsLoaded(true);
+        }
+      }
+    } catch {}
+    if (!cacheKey) setBetsLoaded(false);
     load();
     const t = setInterval(load, 6000);
     return () => clearInterval(t);
