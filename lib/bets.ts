@@ -19,8 +19,19 @@ async function getLogsChunked(address: `0x${string}`, event: any) {
   const out: any[] = [];
   for (let from = START_BLOCK; from <= toBlock; from += CHUNK) {
     const to = from + CHUNK - 1n < toBlock ? from + CHUNK - 1n : toBlock;
-    const logs = await client.getLogs({ address, event, fromBlock: from, toBlock: to });
-    out.push(...(logs as any[]));
+    // Public RPCs are flaky under scan load (transient errors / empty
+    // pages) — one retry per chunk before giving up.
+    let logs: any[] | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        logs = await client.getLogs({ address, event, fromBlock: from, toBlock: to }) as any[];
+        break;
+      } catch (e) {
+        if (attempt === 1) throw e;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+    out.push(...(logs ?? []));
   }
   return out;
 }
