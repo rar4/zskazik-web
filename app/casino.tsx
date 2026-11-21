@@ -78,6 +78,7 @@ export default function Casino() {
   const [msg, setMsg] = useState('');
   const [bankroll, setBankroll] = useState('0');
   const [bets, setBets] = useState<Bet[]>([]);
+  const [betsLoaded, setBetsLoaded] = useState(false);
 
   // Allowance via react-query: refetches automatically when the connected
   // chain (and thus the public client) changes. The old hand-rolled poll
@@ -175,9 +176,14 @@ export default function Casino() {
         betsRef.current = data;
         setBets(data);
       }
-    } catch {}
+      setBetsLoaded(true);
+    } catch {
+      setBetsLoaded(true);
+    }
   };
   useEffect(() => {
+    setBetsLoaded(false);
+    betsRef.current = [];
     load();
     const t = setInterval(load, 6000);
     return () => clearInterval(t);
@@ -420,7 +426,8 @@ export default function Casino() {
       )}
       <div style={S.card}>
         <b>recent bets</b>
-        {(Array.isArray(bets) ? bets : []).length === 0 && <div style={S.muted}>no bets yet</div>}
+        {!betsLoaded && <div style={S.muted}><Spinner size={11} /> loading history…</div>}
+        {betsLoaded && (Array.isArray(bets) ? bets : []).length === 0 && <div style={S.muted}>no bets yet</div>}
         {(Array.isArray(bets) ? bets : []).map((b) => (
           <div key={b.game_bet_id} style={{ ...S.muted, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span>
