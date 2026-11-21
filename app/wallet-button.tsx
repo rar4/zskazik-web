@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useAccount, useConnect, useDisconnect } from 'wagmi';
 import { useAppKit } from '@reown/appkit/react';
 import { appKitEnabled } from '../lib/appkit';
+import Spinner from './spinner';
 
 const btn = {
   padding: '10px 16px',
@@ -43,7 +44,7 @@ function AppKitButton() {
   // Referenced so the hook registration is explicit; <appkit-button />
   // itself reads the modal singleton created in lib/appkit.ts.
   useAppKit();
-  return <appkit-button />;
+  return <appkit-button label="Connect Wallet" loadingLabel="Connecting…" />;
 }
 
 // EIP-6963 discovered wallets get connector id = their rdns (e.g. OKX is
@@ -71,6 +72,7 @@ function FallbackButton({
   const { connect, connectors, error: connectError, isPending, reset: resetConnect } = useConnect();
   const { disconnect } = useDisconnect();
   const [notice, setNotice] = useState('');
+  const [waiting, setWaiting] = useState(false);
   const connectorsRef = useRef(connectors);
   connectorsRef.current = connectors;
 
@@ -90,25 +92,30 @@ function FallbackButton({
 
   const onConnect = async () => {
     setNotice('');
-    // Wait for the wallet to finish injecting instead of firing connect()
-    // into a not-yet-present provider (which throws ProviderNotFoundError
-    // and then "connects anyway" when the wallet announces itself).
-    // EIP-6963 wallets like OKX announce asynchronously after page load.
-    for (let i = 0; i < 30; i++) {
-      const c = pickConnector(connectorsRef.current as any[]);
-      if (c && c.id !== 'injected') {
-        connect({ connector: c });
-        return;
+    setWaiting(true);
+    try {
+      // Wait for the wallet to finish injecting instead of firing connect()
+      // into a not-yet-present provider (which throws ProviderNotFoundError
+      // and then "connects anyway" when the wallet announces itself).
+      // EIP-6963 wallets like OKX announce asynchronously after page load.
+      for (let i = 0; i < 30; i++) {
+        const c = pickConnector(connectorsRef.current as any[]);
+        if (c && c.id !== 'injected') {
+          connect({ connector: c });
+          return;
+        }
+        if (c && typeof window !== 'undefined' && (window as any).ethereum) {
+          connect({ connector: c });
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 100));
       }
-      if (c && typeof window !== 'undefined' && (window as any).ethereum) {
-        connect({ connector: c });
-        return;
-      }
-      await new Promise((r) => setTimeout(r, 100));
+      setNotice(
+        'No wallet detected yet — if you use OKX/MetaMask, open it once, then try again.',
+      );
+    } finally {
+      setWaiting(false);
     }
-    setNotice(
-      'No wallet detected yet — if you use OKX/MetaMask, open it once, then try again.',
-    );
   };
 
   // ProviderNotFoundError is transient ("wallet still injecting"), not a
@@ -118,10 +125,12 @@ function FallbackButton({
     (connectError as any).name !== 'ProviderNotFoundError' &&
     !/Provider not found/i.test(connectError.message);
 
+  const busy = waiting || isPending;
   return (
     <div>
-      <button style={btn} disabled={isPending} onClick={onConnect}>
-        {isPending ? 'connecting…' : 'connect wallet'}
+      <button style={{ ...btn, opacity: busy ? 0.7 : 1, cursor: busy ? 'wait' : 'pointer' }} disabled={busy} onClick={onConnect}>
+        {busy && <Spinner />}
+        {busy ? 'Connecting…' : 'connect wallet'}
       </button>
       {notice && <div style={{ opacity: 0.7, fontSize: 13, marginTop: 6 }}>{notice}</div>}
       {showError && (

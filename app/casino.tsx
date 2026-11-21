@@ -10,6 +10,7 @@ import flipAbi from '../abi/CoinFlip.json';
 import diceAbi from '../abi/Dice.json';
 import plinkoAbi from '../abi/Plinko.json';
 import WalletButton from './wallet-button';
+import Spinner from './spinner';
 
 const T = (process.env.NEXT_PUBLIC_TOKEN || '') as `0x${string}`;
 const TR = (process.env.NEXT_PUBLIC_TREASURY || '') as `0x${string}`;
@@ -65,6 +66,7 @@ export default function Casino() {
   const [target, setTarget] = useState(50);
   const [rows, setRows] = useState(8);
   const [pending, setPending] = useState<string | null>(null);
+  const [approving, setApproving] = useState(false);
   const [msg, setMsg] = useState('');
   const [allowance, setAllowance] = useState('0');
   const [bankroll, setBankroll] = useState('0');
@@ -99,22 +101,29 @@ export default function Casino() {
   const needApprove = BigInt(allowance || '0') < parseEther(wager || '0');
 
   const approve = async () => {
-    if (!wallet) return;
+    if (!wallet || approving) return;
     if (wrongChain) {
       setMsg('switching to Sepolia first…');
       switchChain({ chainId: sepolia.id });
       return;
     }
-    setMsg('approving treasury…');
-    // Exact amount, not 2^256-1: OKX Wallet (and most wallets) block
-    // unlimited ERC20 approvals as a security risk.
-    const hash = await wallet.writeContract({
-      address: T, abi: tokenAbi, functionName: 'approve',
-      args: [TR, parseEther(wager || '0')], gas: GAS_APPROVE,
-    } as any);
-    await publicClient!.waitForTransactionReceipt({ hash });
-    setMsg('approved ✓ now place your bet');
-    load();
+    setApproving(true);
+    try {
+      setMsg('approving treasury… confirm in your wallet');
+      // Exact amount, not 2^256-1: OKX Wallet (and most wallets) block
+      // unlimited ERC20 approvals as a security risk.
+      const hash = await wallet.writeContract({
+        address: T, abi: tokenAbi, functionName: 'approve',
+        args: [TR, parseEther(wager || '0')], gas: GAS_APPROVE,
+      } as any);
+      await publicClient!.waitForTransactionReceipt({ hash });
+      setMsg('approved ✓ now place your bet');
+      load();
+    } catch (e: any) {
+      setMsg('approve failed: ' + (e.shortMessage || e.message));
+    } finally {
+      setApproving(false);
+    }
   };
 
   const waitBlocks = async (n: number) => {
@@ -205,12 +214,17 @@ export default function Casino() {
           {tab === 'flip' && <div style={S.muted}>pays 1.96x (2% edge)</div>}
           {tab === 'plinko' && <div style={S.muted}>pays by bin table, up to 16x on 16 rows</div>}
           <div style={S.row}>
-            {needApprove && isConnected && !wrongChain && <button style={S.btn} onClick={approve}>1️⃣ approve treasury</button>}
-            <button style={S.btn} disabled={!isConnected || pending !== null || wrongChain || needApprove} onClick={play}>
-              {pending ? 'resolving…' : needApprove ? 'approve first ↑' : 'bet'}
+            {needApprove && isConnected && !wrongChain && (
+              <button style={{ ...S.btn, opacity: approving ? 0.7 : 1, cursor: approving ? 'wait' : 'pointer' }} disabled={approving} onClick={approve}>
+                {approving ? <><Spinner />approving…</> : '1️⃣ approve treasury'}
+              </button>
+            )}
+            <button style={{ ...S.btn, opacity: pending ? 0.7 : 1, cursor: pending ? 'wait' : 'pointer' }} disabled={!isConnected || pending !== null || wrongChain || needApprove || approving} onClick={play}>
+              {pending ? <><Spinner />resolving…</> : needApprove ? 'approve first ↑' : 'bet'}
             </button>
           </div>
-          {msg && <div style={{ marginTop: 8 }}>{msg}</div>}
+          {(approving || pending) && msg && <div style={{ marginTop: 8 }}><Spinner />{msg}</div>}
+          {msg && !approving && !pending && <div style={{ marginTop: 8 }}>{msg}</div>}
           {pending && <div style={S.muted}>bet {pending} — wait 2 blocks, auto-resolving…</div>}
         </div>
       )}
