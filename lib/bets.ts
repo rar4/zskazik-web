@@ -20,10 +20,11 @@ const CHUNK = 40_000n;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function getLogsChunked(address: `0x${string}`, event: any) {
-  // -2: public RPCs are load-balanced and getBlockNumber() can return a
-  // block ahead of the node answering getLogs ("range extends beyond
-  // current head"). History lagging 2 blocks is harmless.
-  const toBlock = (await client.getBlockNumber()) - 2n;
+  // -30: public RPCs are load-balanced and backends lag each other by
+  // many blocks — a scan to the reported head intermittently misses the
+  // newest logs on lagging backends. History lagging ~6 min is harmless
+  // (the UI re-polls every 6s).
+  const toBlock = (await client.getBlockNumber()) - 30n;
   const out: any[] = [];
   for (let from = START_BLOCK; from <= toBlock; from += CHUNK) {
     const to = from + CHUNK - 1n < toBlock ? from + CHUNK - 1n : toBlock;
