@@ -326,7 +326,14 @@ export default function Casino() {
     <div style={S.page}>
       <div style={S.header}>
         <h1>🎰 ZSKazik</h1>
-        <WalletButton />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {isConnected && balanceData !== undefined && (
+            <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }} title="Your ZSK balance">
+              {fmt((balanceData as bigint).toString())} ZSK
+            </span>
+          )}
+          <WalletButton />
+        </div>
       </div>
       {wrongChain && (
         <div style={{ background: '#4a2b00', border: '1px solid #b97a1a', padding: 12, borderRadius: 10, marginTop: 12 }}>
