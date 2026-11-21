@@ -8,9 +8,10 @@ export const START_BLOCK = BigInt(process.env.START_BLOCK || '61788600');
 export const ADDR = {
   token: (process.env.NEXT_PUBLIC_TOKEN || '0x79d782ffb87a643b9c5369f54f0c1fca02f40a89') as `0x${string}`,
   treasury: (process.env.NEXT_PUBLIC_TREASURY || '0xa84a9505753e0be52486e181bd9dde77d261ad56') as `0x${string}`,
-  coinflip: (process.env.NEXT_PUBLIC_COINFLIP || '0x22157527B27C4E3174215126c100f66B041cF082') as `0x${string}`,
-  dice: (process.env.NEXT_PUBLIC_DICE || '0xe3192207Fa9Da7BdBFfd09E0F01FB49C14E59b04') as `0x${string}`,
-  plinko: (process.env.NEXT_PUBLIC_PLINKO || '0x1a2a89bfdd940b34f62237b6ccb4b8d2644a37cd') as `0x${string}`,
+  coinflip: (process.env.NEXT_PUBLIC_COINFLIP || '0xAF7fDDa566905860D6BF3AdB4cd73Dc771Fab366') as `0x${string}`,
+  dice: (process.env.NEXT_PUBLIC_DICE || '0xDcCBA84D53BF3daa275f57cA7e81b202892EfC14') as `0x${string}`,
+  plinko: (process.env.NEXT_PUBLIC_PLINKO || '0xdDe34251ad0E1EeD50602680FACdA3e4C66E7f08') as `0x${string}`,
+  forwarder: (process.env.NEXT_PUBLIC_FORWARDER || '0x0FA6F0693cd56D6dE6DD0297C75CCf41FafCbda7') as `0x${string}`,
 };
 
 export function isZeroAddr(a: string) {

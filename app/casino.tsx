@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useAccount, usePublicClient, useReadContract, useSwitchChain, useWalletClient } from 'wagmi';
-import { parseEther, formatEther, parseEventLogs } from 'viem';
+import { parseEther, formatEther, parseEventLogs, encodeFunctionData } from 'viem';
 import { baseSepolia } from 'viem/chains';
+import { getSessionAccount, metaDigest, forwarderAbi, SESSION_DAYS } from '../lib/session';
 import tokenAbi from '../abi/CasinoToken.json';
 import treasuryAbi from '../abi/Treasury.json';
 import flipAbi from '../abi/CoinFlip.json';
@@ -14,9 +15,10 @@ import Spinner from './spinner';
 
 const T = (process.env.NEXT_PUBLIC_TOKEN || '0x79d782ffb87a643b9c5369f54f0c1fca02f40a89') as `0x${string}`;
 const TR = (process.env.NEXT_PUBLIC_TREASURY || '0xa84a9505753e0be52486e181bd9dde77d261ad56') as `0x${string}`;
-const FL = (process.env.NEXT_PUBLIC_COINFLIP || '0x22157527B27C4E3174215126c100f66B041cF082') as `0x${string}`;
-const DI = (process.env.NEXT_PUBLIC_DICE || '0xe3192207Fa9Da7BdBFfd09E0F01FB49C14E59b04') as `0x${string}`;
-const PL = (process.env.NEXT_PUBLIC_PLINKO || '0x1a2a89bfdd940b34f62237b6ccb4b8d2644a37cd') as `0x${string}`;
+const FL = (process.env.NEXT_PUBLIC_COINFLIP || '0xAF7fDDa566905860D6BF3AdB4cd73Dc771Fab366') as `0x${string}`;
+const DI = (process.env.NEXT_PUBLIC_DICE || '0xDcCBA84D53BF3daa275f57cA7e81b202892EfC14') as `0x${string}`;
+const PL = (process.env.NEXT_PUBLIC_PLINKO || '0xdDe34251ad0E1EeD50602680FACdA3e4C66E7f08') as `0x${string}`;
+const FW = (process.env.NEXT_PUBLIC_FORWARDER || '0x0FA6F0693cd56D6dE6DD0297C75CCf41FafCbda7') as `0x${string}`;
 // Fallbacks = the deployed Base Sepolia addresses (broadcast/*/84532 in the
 // contracts repo). Without them a missing NEXT_PUBLIC_* env var made T/TR/…
 // '' and writeContract sent approve calldata with an empty `to` — MetaMask
@@ -106,6 +108,41 @@ export default function Casino() {
   });
   const insufficientBalance = wagerValid && balanceData !== undefined && (balanceData as bigint) < wagerWei!;
   const needApprove = wagerValid && BigInt(allowance || '0') < wagerWei!;
+
+  // Session-key (0-popup) betting: is a session authorised on-chain?
+  const { data: sessionActiveData, refetch: refetchSession } = useReadContract({
+    address: FW,
+    abi: forwarderAbi as any,
+    functionName: 'isSessionActive',
+    args: address ? ([address] as any) : undefined,
+    query: { enabled: !!address && !!FW },
+  });
+  const sessionActive = sessionActiveData === true;
+  const [settingUp, setSettingUp] = useState(false);
+
+  // One-time setup (1 popup): authorise the browser session key for 30 days.
+  // After this, bets need 0 popups - session key signs off-chain, relayer submits.
+  const setupSession = async () => {
+    if (!wallet || settingUp) return;
+    const session = getSessionAccount();
+    if (!session) return;
+    setSettingUp(true);
+    try {
+      const expiry = BigInt(Math.floor(Date.now() / 1000) + SESSION_DAYS * 24 * 3600);
+      setMsg('authorising session key… confirm in your wallet (one-time)');
+      const hash = await wallet.writeContract({
+        address: FW, abi: forwarderAbi, functionName: 'setSigner',
+        args: [session.address, expiry],
+      } as any);
+      await publicClient!.waitForTransactionReceipt({ hash });
+      await refetchSession();
+      setMsg('1-click betting enabled ✓ bets now need 0 popups');
+    } catch (e: any) {
+      setMsg('session setup failed: ' + (e.shortMessage || e.message));
+    } finally {
+      setSettingUp(false);
+    }
+  };
 
   const publicClientRef = useRef(publicClient);
   publicClientRef.current = publicClient;
@@ -202,6 +239,38 @@ export default function Casino() {
     }
     setMsg('');
     setPlacing(true);
+    // 0-popup path: session key signs off-chain, relayer submits + resolves.
+    if (sessionActive && address) {
+      try {
+        const session = getSessionAccount();
+        if (!session) throw new Error('no session key');
+        const targetAddr = tab === 'flip' ? FL : tab === 'dice' ? DI : PL;
+        const abi = tab === 'flip' ? flipAbi : tab === 'dice' ? diceAbi : plinkoAbi;
+        const fn = tab === 'flip' ? 'flip' : tab === 'dice' ? 'roll' : 'drop';
+        const args = tab === 'flip' ? [choice, wagerWei] : tab === 'dice' ? [target, wagerWei] : [rows, wagerWei];
+        const callData = encodeFunctionData({ abi: abi as any, functionName: fn, args: args as any });
+        const nonce = (await publicClient!.readContract({
+          address: FW, abi: forwarderAbi, functionName: 'nonces', args: [address],
+        } as any)) as bigint;
+        const digest = metaDigest(address, targetAddr, callData, nonce);
+        const signature = await session.signMessage({ message: { raw: digest } });
+        setMsg('placing (1-click, no popup)…');
+        const res = await fetch('/api/relay', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user: address, target: targetAddr, callData, signature }),
+        });
+        const j = await res.json();
+        if (!res.ok) throw new Error(j.error || 'relay failed');
+        setMsg('settled ✓ check history');
+        return;
+      } catch (e: any) {
+        // Fall through to the direct wallet path below on any relay failure.
+        setMsg('1-click failed (' + (e.shortMessage || e.message) + ') — falling back to wallet…');
+      } finally {
+        setPending(null); setPlacing(false); load();
+      }
+    }
     try {
       const w = wagerWei;
       let gameId: `0x${string}`;
@@ -298,9 +367,15 @@ export default function Casino() {
               </button>
             )}
             <button style={{ ...S.btn, opacity: (pending || placing) ? 0.7 : 1, cursor: (pending || placing) ? 'wait' : 'pointer' }} disabled={!isConnected || pending !== null || placing || wrongChain || !wagerValid || needApprove || approving || insufficientBalance} onClick={play}>
-              {pending || placing ? <><Spinner />{placing && !pending ? 'placing…' : 'resolving…'}</> : needApprove ? 'approve first ↑' : 'bet'}
+              {pending || placing ? <><Spinner />{placing && !pending ? 'placing…' : 'resolving…'}</> : needApprove ? 'approve first ↑' : sessionActive ? 'bet (0 popups)' : 'bet'}
             </button>
+            {isConnected && !wrongChain && !sessionActive && (
+              <button style={{ ...S.btn, background: '#1f6f4a', opacity: settingUp ? 0.7 : 1 }} disabled={settingUp} onClick={setupSession}>
+                {settingUp ? <><Spinner />enabling…</> : '⚡ enable 1-click betting (sign once)'}
+              </button>
+            )}
           </div>
+          {isConnected && sessionActive && <div style={S.muted}>1-click betting on — bets need 0 popups for 30 days</div>}
           {!wagerValid && isConnected && <div style={S.muted}>enter a valid wager amount</div>}
           {insufficientBalance && <div style={{ color: '#ff9', marginTop: 6 }}>insufficient ZSK balance for this wager</div>}
           {(approving || pending) && msg && <div style={{ marginTop: 8 }}><Spinner />{msg}</div>}
