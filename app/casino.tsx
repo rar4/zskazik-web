@@ -14,8 +14,8 @@ import Spinner from './spinner';
 
 const T = (process.env.NEXT_PUBLIC_TOKEN || '0x79d782ffb87a643b9c5369f54f0c1fca02f40a89') as `0x${string}`;
 const TR = (process.env.NEXT_PUBLIC_TREASURY || '0xa84a9505753e0be52486e181bd9dde77d261ad56') as `0x${string}`;
-const FL = (process.env.NEXT_PUBLIC_COINFLIP || '0x22157527b27c4e3174215126c100f66b041cf082') as `0x${string}`;
-const DI = (process.env.NEXT_PUBLIC_DICE || '0xe3192207fa9da7bdbffd09e0f01fb49c14e59b04') as `0x${string}`;
+const FL = (process.env.NEXT_PUBLIC_COINFLIP || '0x3ca2AeC906EbBCf550619e29389e9Bd440ef268B') as `0x${string}`;
+const DI = (process.env.NEXT_PUBLIC_DICE || '0xF4Bf21af01451dc3eF1196C4F3b176F1969004bc') as `0x${string}`;
 const PL = (process.env.NEXT_PUBLIC_PLINKO || '0x1a2a89bfdd940b34f62237b6ccb4b8d2644a37cd') as `0x${string}`;
 // Fallbacks = the deployed Sepolia addresses (broadcast/*/11155111 in the
 // contracts repo). Without them a missing NEXT_PUBLIC_* env var made T/TR/…
@@ -70,6 +70,8 @@ export default function Casino() {
   const [target, setTarget] = useState(50);
   const [rows, setRows] = useState(8);
   const [pending, setPending] = useState<string | null>(null);
+  const [placing, setPlacing] = useState(false);
+  const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [approving, setApproving] = useState(false);
   const [msg, setMsg] = useState('');
   const [bankroll, setBankroll] = useState('0');
@@ -89,6 +91,21 @@ export default function Casino() {
     query: { enabled: !!address && !!T },
   });
   const allowance = allowanceData?.toString() ?? '0';
+
+  // parseEther throws on invalid input — typing garbage into the wager
+  // box used to crash the whole page during render (needApprove is
+  // computed every render). Parse safely and gate the buttons instead.
+  const wagerWei = safeParseEther(wager);
+  const wagerValid = wagerWei !== null && wagerWei > 0n;
+  const { data: balanceData } = useReadContract({
+    address: T,
+    abi: tokenAbi as any,
+    functionName: 'balanceOf',
+    args: address ? ([address] as any) : undefined,
+    query: { enabled: !!address && !!T },
+  });
+  const insufficientBalance = wagerValid && balanceData !== undefined && (balanceData as bigint) < wagerWei!;
+  const needApprove = wagerValid && BigInt(allowance || '0') < wagerWei!;
 
   const publicClientRef = useRef(publicClient);
   publicClientRef.current = publicClient;
@@ -114,10 +131,12 @@ export default function Casino() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address]);
 
-  const needApprove = BigInt(allowance || '0') < parseEther(wager || '0');
-
   const approve = async () => {
     if (!wallet || approving) return;
+    if (!wagerValid || !wagerWei) {
+      setMsg('enter a valid wager amount first');
+      return;
+    }
     if (!T || !TR) {
       setMsg('config error: contract addresses missing');
       return;
@@ -134,13 +153,13 @@ export default function Casino() {
       // unlimited ERC20 approvals as a security risk.
       const hash = await wallet.writeContract({
         address: T, abi: tokenAbi, functionName: 'approve',
-        args: [TR, parseEther(wager || '0')], gas: GAS_APPROVE,
+        args: [TR, wagerWei], gas: GAS_APPROVE,
       } as any);
       await publicClient!.waitForTransactionReceipt({ hash });
       // The RPC can lag a block behind the receipt — poll the allowance
       // refetch until it reflects the approval (or give up after ~10s,
       // the 6s background poll + this query's refetch will catch up).
-      const want = parseEther(wager || '0');
+      const want = wagerWei;
       for (let i = 0; i < 5; i++) {
         const r = await refetchAllowance();
         if (r.data && (r.data as bigint) >= want) break;
@@ -163,7 +182,15 @@ export default function Casino() {
   };
 
   const play = async () => {
-    if (!wallet) return;
+    if (!wallet || placing || pending) return;
+    if (!wagerValid || !wagerWei) {
+      setMsg('enter a valid wager amount first');
+      return;
+    }
+    if (insufficientBalance) {
+      setMsg('insufficient ZSK balance for this wager');
+      return;
+    }
     if (!FL || !DI || !PL) {
       setMsg('config error: game contract addresses missing');
       return;
@@ -174,8 +201,9 @@ export default function Casino() {
       return;
     }
     setMsg('');
+    setPlacing(true);
     try {
-      const w = parseEther(wager);
+      const w = wagerWei;
       let gameId: `0x${string}`;
       if (tab === 'flip') {
         const h = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'flip', args: [choice, w], gas: GAS_PLACE } as any);
@@ -203,7 +231,24 @@ export default function Casino() {
     } catch (e: any) {
       setMsg('failed: ' + (e.shortMessage || e.message));
     } finally {
-      setPending(null); load();
+      setPending(null); setPlacing(false); load();
+    }
+  };
+
+  const resolveStuck = async (b: Bet) => {
+    if (!wallet || resolvingId) return;
+    const addr = b.game === 'coinflip' ? FL : b.game === 'dice' ? DI : PL;
+    const abi = b.game === 'coinflip' ? flipAbi : b.game === 'dice' ? diceAbi : plinkoAbi;
+    setResolvingId(b.game_bet_id);
+    try {
+      const h = await wallet.writeContract({ address: addr, abi, functionName: 'resolve', args: [b.game_bet_id], gas: GAS_RESOLVE } as any);
+      await publicClient!.waitForTransactionReceipt({ hash: h });
+      setMsg('settled ✓ check history');
+      load();
+    } catch (e: any) {
+      setMsg('resolve failed: ' + (e.shortMessage || e.message));
+    } finally {
+      setResolvingId(null);
     }
   };
 
@@ -247,15 +292,17 @@ export default function Casino() {
           {tab === 'flip' && <div style={S.muted}>pays 1.96x (2% edge)</div>}
           {tab === 'plinko' && <div style={S.muted}>pays by bin table, up to 16x on 16 rows</div>}
           <div style={S.row}>
-            {needApprove && isConnected && !wrongChain && (
-              <button style={{ ...S.btn, opacity: approving ? 0.7 : 1, cursor: approving ? 'wait' : 'pointer' }} disabled={approving} onClick={approve}>
+            {needApprove && isConnected && !wrongChain && wagerValid && (
+              <button style={{ ...S.btn, opacity: approving ? 0.7 : 1, cursor: approving ? 'wait' : 'pointer' }} disabled={approving || insufficientBalance} onClick={approve}>
                 {approving ? <><Spinner />approving…</> : '1️⃣ approve treasury'}
               </button>
             )}
-            <button style={{ ...S.btn, opacity: pending ? 0.7 : 1, cursor: pending ? 'wait' : 'pointer' }} disabled={!isConnected || pending !== null || wrongChain || needApprove || approving} onClick={play}>
-              {pending ? <><Spinner />resolving…</> : needApprove ? 'approve first ↑' : 'bet'}
+            <button style={{ ...S.btn, opacity: (pending || placing) ? 0.7 : 1, cursor: (pending || placing) ? 'wait' : 'pointer' }} disabled={!isConnected || pending !== null || placing || wrongChain || !wagerValid || needApprove || approving || insufficientBalance} onClick={play}>
+              {pending || placing ? <><Spinner />{placing && !pending ? 'placing…' : 'resolving…'}</> : needApprove ? 'approve first ↑' : 'bet'}
             </button>
           </div>
+          {!wagerValid && isConnected && <div style={S.muted}>enter a valid wager amount</div>}
+          {insufficientBalance && <div style={{ color: '#ff9', marginTop: 6 }}>insufficient ZSK balance for this wager</div>}
           {(approving || pending) && msg && <div style={{ marginTop: 8 }}><Spinner />{msg}</div>}
           {msg && !approving && !pending && <div style={{ marginTop: 8 }}>{msg}</div>}
           {pending && <div style={S.muted}>bet {pending} — wait 2 blocks, auto-resolving…</div>}
@@ -265,8 +312,19 @@ export default function Casino() {
         <b>recent bets</b>
         {(Array.isArray(bets) ? bets : []).length === 0 && <div style={S.muted}>no bets yet</div>}
         {(Array.isArray(bets) ? bets : []).map((b) => (
-          <div key={b.game_bet_id} style={S.muted}>
-            {b.game} · {fmt(b.wager)} → {b.payout ? fmt(b.payout) : '…'} · {b.status}
+          <div key={b.game_bet_id} style={{ ...S.muted, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>
+              {b.game} · {fmt(b.wager)} → {b.payout ? fmt(b.payout) : '…'} · {b.status}
+            </span>
+            {b.status === 'escrowed' && isConnected && !wrongChain && (
+              <button
+                style={{ ...S.btn, padding: '4px 10px', fontSize: 12, opacity: resolvingId === b.game_bet_id ? 0.7 : 1 }}
+                disabled={resolvingId !== null || pending !== null}
+                onClick={() => resolveStuck(b)}
+              >
+                {resolvingId === b.game_bet_id ? <><Spinner size={11} />resolving…</> : 'resolve'}
+              </button>
+            )}
           </div>
         ))}
       </div>
@@ -276,6 +334,15 @@ export default function Casino() {
 
 function fmt(w: string) {
   try { return Number(formatEther(BigInt(w))).toLocaleString(); } catch { return w; }
+}
+
+function safeParseEther(v: string): bigint | null {
+  try {
+    if (!v || !/^\d+(\.\d+)?$/.test(v.trim())) return null;
+    return parseEther(v.trim());
+  } catch {
+    return null;
+  }
 }
 
 function parseGameId(rc: any, abi: any, placedEvent: string): `0x${string}` {
