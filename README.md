@@ -39,22 +39,12 @@ To enable it:
 
 ## Deploy on Vercel (push-to-deploy)
 
-The Vercel project was created via CLI and is not Git-connected, so a push
-alone does not deploy. `.github/workflows/vercel.yml` closes that gap: every
-push to `main` runs `vercel deploy --prod` against the existing project
-(env vars, domains and aliases are preserved — no new project is created).
+The Vercel project is Git-connected (`rar4/zskazik-web`, production branch
+`main`): every push to `main` automatically builds and deploys to
+production at https://zskazik-web.vercel.app. No manual deploy step needed.
 
-One-time setup: create a token at https://vercel.com/account/tokens and
-add it as repo secret `VERCEL_TOKEN` (`gh secret set VERCEL_TOKEN`).
-Until the secret exists the workflow run fails harmlessly; every later push
-(and manual runs via Actions → "deploy-vercel" → Run workflow) deploys.
-
-Permanent alternative: Vercel dashboard → Project → Settings → Git →
-Connect Git Repository (`rar4/zskazik-web`). Once connected, Vercel deploys
-on push natively and the workflow can be deleted.
-
-Manual deploy from this machine (no GitHub Actions): `npx vercel deploy
---prod --yes` from this folder.
+(The earlier GitHub Actions `vercel deploy` workflow was removed once the
+native Git connection was set up — it would have double-deployed.)
 
 Notes:
 - `START_BLOCK` must be the block your contracts were deployed at — log scans
