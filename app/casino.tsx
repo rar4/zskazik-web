@@ -17,6 +17,15 @@ const FL = (process.env.NEXT_PUBLIC_COINFLIP || '') as `0x${string}`;
 const DI = (process.env.NEXT_PUBLIC_DICE || '') as `0x${string}`;
 const PL = (process.env.NEXT_PUBLIC_PLINKO || '') as `0x${string}`;
 
+// Explicit gas limits, measured from real Sepolia receipts (approve 128k,
+// place 1.09–1.18M, resolve 335–539k) with headroom. Without them the
+// wallet must estimate gas itself — OKX frequently fails that step with
+// "network fee estimation unsuccessful" even though the tx is valid.
+// An explicit limit makes the wallet skip estimation entirely.
+const GAS_APPROVE = 200_000n;
+const GAS_PLACE = 1_500_000n;
+const GAS_RESOLVE = 800_000n;
+
 type Tab = 'flip' | 'dice' | 'plinko' | 'history';
 type Bet = { game_bet_id: string; game: string; player: string; wager: string; payout?: string; status: string };
 
@@ -101,7 +110,7 @@ export default function Casino() {
     // unlimited ERC20 approvals as a security risk.
     const hash = await wallet.writeContract({
       address: T, abi: tokenAbi, functionName: 'approve',
-      args: [TR, parseEther(wager || '0')],
+      args: [TR, parseEther(wager || '0')], gas: GAS_APPROVE,
     } as any);
     await publicClient!.waitForTransactionReceipt({ hash });
     setMsg('approved ✓ now place your bet');
@@ -127,25 +136,25 @@ export default function Casino() {
       const w = parseEther(wager);
       let gameId: `0x${string}`;
       if (tab === 'flip') {
-        const h = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'flip', args: [choice, w] } as any);
+        const h = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'flip', args: [choice, w], gas: GAS_PLACE } as any);
         gameId = parseGameId(await publicClient!.waitForTransactionReceipt({ hash: h }), flipAbi, 'FlipPlaced');
         setPending(gameId); setMsg('flipped — resolving…');
         await waitBlocks(2);
-        const rh = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'resolve', args: [gameId] } as any);
+        const rh = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
         await publicClient!.waitForTransactionReceipt({ hash: rh });
       } else if (tab === 'dice') {
-        const h = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'roll', args: [target, w] } as any);
+        const h = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'roll', args: [target, w], gas: GAS_PLACE } as any);
         gameId = parseGameId(await publicClient!.waitForTransactionReceipt({ hash: h }), diceAbi, 'RollPlaced');
         setPending(gameId); setMsg('rolled — resolving…');
         await waitBlocks(2);
-        const rh = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'resolve', args: [gameId] } as any);
+        const rh = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
         await publicClient!.waitForTransactionReceipt({ hash: rh });
       } else {
-        const h = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'drop', args: [rows, w] } as any);
+        const h = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'drop', args: [rows, w], gas: GAS_PLACE } as any);
         gameId = parseGameId(await publicClient!.waitForTransactionReceipt({ hash: h }), plinkoAbi, 'DropPlaced');
         setPending(gameId); setMsg('dropped — resolving…');
         await waitBlocks(2);
-        const rh = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'resolve', args: [gameId] } as any);
+        const rh = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
         await publicClient!.waitForTransactionReceipt({ hash: rh });
       }
       setMsg('settled ✓ check history');
