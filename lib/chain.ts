@@ -1,4 +1,4 @@
-import { createPublicClient, http, parseAbiItem } from 'viem';
+import { createPublicClient, fallback, http, parseAbiItem } from 'viem';
 
 export const RPC_URL = process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
 export const START_BLOCK = BigInt(process.env.START_BLOCK || '12180054');
@@ -24,7 +24,21 @@ export const ADDR_OLD = {
   dice: '0xe3192207Fa9Da7BdBFfd09E0F01FB49C14E59b04' as `0x${string}`,
 };
 
-export const client = createPublicClient({ transport: http(RPC_URL) });
+export const client = createPublicClient({
+  // Fallback across public Sepolia endpoints: single-endpoint scans
+  // intermittently return partial/empty log pages (lagging or throttled
+  // backends). viem's fallback transport moves to the next URL on error.
+  transport: fallback(
+    [
+      RPC_URL,
+      'https://ethereum-sepolia-rpc.publicnode.com',
+      'https://1rpc.io/sepolia',
+    ]
+      .filter((u, i, a) => a.indexOf(u) === i)
+      .map((u) => http(u, { timeout: 10_000 })),
+    { rank: false },
+  ),
+});
 
 export const EV = {
   flipPlaced: parseAbiItem(
