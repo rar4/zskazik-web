@@ -122,10 +122,10 @@ export default function Casino() {
 
   // One-time setup (1 popup): authorise the browser session key for 30 days.
   // After this, bets need 0 popups - session key signs off-chain, relayer submits.
-  const setupSession = async () => {
-    if (!wallet || settingUp) return;
+  const ensureSession = async (): Promise<boolean> => {
+    if (!wallet || settingUp) return false;
     const session = getSessionAccount();
-    if (!session) return;
+    if (!session) return false;
     setSettingUp(true);
     try {
       const expiry = BigInt(Math.floor(Date.now() / 1000) + SESSION_DAYS * 24 * 3600);
@@ -136,9 +136,10 @@ export default function Casino() {
       } as any);
       await publicClient!.waitForTransactionReceipt({ hash });
       await refetchSession();
-      setMsg('1-click betting enabled ✓ bets now need 0 popups');
+      return true;
     } catch (e: any) {
       setMsg('session setup failed: ' + (e.shortMessage || e.message));
+      return false;
     } finally {
       setSettingUp(false);
     }
@@ -168,44 +169,33 @@ export default function Casino() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address]);
 
-  const approve = async () => {
-    if (!wallet || approving) return;
-    if (!wagerValid || !wagerWei) {
-      setMsg('enter a valid wager amount first');
-      return;
-    }
+  // One-time approval for the whole session: approve the user's full ZSK
+  // balance (finite, so wallets don't block it like unlimited approvals),
+  // not just one wager - covers many bets with a single popup.
+  const ensureApproved = async (): Promise<boolean> => {
+    if (!wallet || approving) return false;
     if (!T || !TR) {
       setMsg('config error: contract addresses missing');
-      return;
+      return false;
     }
-    if (wrongChain) {
-      setMsg('switching to Base Sepolia first…');
-      switchChain({ chainId: baseSepolia.id });
-      return;
-    }
+    const amount = balanceData && (balanceData as bigint) > wagerWei! ? (balanceData as bigint) : wagerWei!;
     setApproving(true);
     try {
-      setMsg('approving treasury… confirm in your wallet');
-      // Exact amount, not 2^256-1: OKX Wallet (and most wallets) block
-      // unlimited ERC20 approvals as a security risk.
+      setMsg('approving treasury for 1-click betting… confirm in your wallet (one-time)');
       const hash = await wallet.writeContract({
         address: T, abi: tokenAbi, functionName: 'approve',
-        args: [TR, wagerWei], gas: GAS_APPROVE,
+        args: [TR, amount], gas: GAS_APPROVE,
       } as any);
       await publicClient!.waitForTransactionReceipt({ hash });
-      // The RPC can lag a block behind the receipt — poll the allowance
-      // refetch until it reflects the approval (or give up after ~10s,
-      // the 6s background poll + this query's refetch will catch up).
-      const want = wagerWei;
       for (let i = 0; i < 5; i++) {
         const r = await refetchAllowance();
-        if (r.data && (r.data as bigint) >= want) break;
+        if (r.data && (r.data as bigint) >= wagerWei!) break;
         await new Promise((res) => setTimeout(res, 2000));
       }
-      setMsg('approved ✓ now place your bet');
-      load();
+      return true;
     } catch (e: any) {
       setMsg('approve failed: ' + (e.shortMessage || e.message));
+      return false;
     } finally {
       setApproving(false);
     }
@@ -239,8 +229,19 @@ export default function Casino() {
     }
     setMsg('');
     setPlacing(true);
+    // Single-button flow: first click does the one-time setup (approve +
+    // session authorisation, 2 popups), then places the bet. Later clicks
+    // skip straight to the 0-popup meta bet.
+    if (needApprove) {
+      const ok = await ensureApproved();
+      if (!ok) { setPlacing(false); return; }
+    }
+    if (!sessionActive) {
+      const ok = await ensureSession();
+      if (!ok) { setPlacing(false); return; }
+    }
     // 0-popup path: session key signs off-chain, relayer submits + resolves.
-    if (sessionActive && address) {
+    if (address) {
       try {
         const session = getSessionAccount();
         if (!session) throw new Error('no session key');
@@ -361,21 +362,11 @@ export default function Casino() {
           {tab === 'flip' && <div style={S.muted}>pays 1.96x (2% edge)</div>}
           {tab === 'plinko' && <div style={S.muted}>pays by bin table, up to 16x on 16 rows</div>}
           <div style={S.row}>
-            {needApprove && isConnected && !wrongChain && wagerValid && (
-              <button style={{ ...S.btn, opacity: approving ? 0.7 : 1, cursor: approving ? 'wait' : 'pointer' }} disabled={approving || insufficientBalance} onClick={approve}>
-                {approving ? <><Spinner />approving…</> : '1️⃣ approve treasury'}
-              </button>
-            )}
-            <button style={{ ...S.btn, opacity: (pending || placing) ? 0.7 : 1, cursor: (pending || placing) ? 'wait' : 'pointer' }} disabled={!isConnected || pending !== null || placing || wrongChain || !wagerValid || needApprove || approving || insufficientBalance} onClick={play}>
-              {pending || placing ? <><Spinner />{placing && !pending ? 'placing…' : 'resolving…'}</> : needApprove ? 'approve first ↑' : sessionActive ? 'bet (0 popups)' : 'bet'}
+            <button style={{ ...S.btn, opacity: (pending || placing || approving || settingUp) ? 0.7 : 1, cursor: (pending || placing || approving || settingUp) ? 'wait' : 'pointer' }} disabled={!isConnected || pending !== null || placing || approving || settingUp || wrongChain || !wagerValid || insufficientBalance} onClick={play}>
+              {placing || approving || settingUp ? <><Spinner />{approving ? 'approving…' : settingUp ? 'enabling…' : 'placing…'}</> : sessionActive && !needApprove ? 'bet' : 'bet (first time: 2 confirmations)'}
             </button>
-            {isConnected && !wrongChain && !sessionActive && (
-              <button style={{ ...S.btn, background: '#1f6f4a', opacity: settingUp ? 0.7 : 1 }} disabled={settingUp} onClick={setupSession}>
-                {settingUp ? <><Spinner />enabling…</> : '⚡ enable 1-click betting (sign once)'}
-              </button>
-            )}
           </div>
-          {isConnected && sessionActive && <div style={S.muted}>1-click betting on — bets need 0 popups for 30 days</div>}
+          {isConnected && sessionActive && !needApprove && <div style={S.muted}>1-click betting on — bets need 0 popups for 30 days</div>}
           {!wagerValid && isConnected && <div style={S.muted}>enter a valid wager amount</div>}
           {insufficientBalance && <div style={{ color: '#ff9', marginTop: 6 }}>insufficient ZSK balance for this wager</div>}
           {(approving || pending) && msg && <div style={{ marginTop: 8 }}><Spinner />{msg}</div>}
