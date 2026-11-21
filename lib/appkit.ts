@@ -56,7 +56,10 @@ export const wagmiConfig = wagmiAdapter
       // MetaMask/OKX/Rabby etc. show up automatically as their own
       // EIP-6963 connectors — a second hand-made injected() wrapper
       // around the same provider makes connect() race (see git history).
-      connectors: [injected({ shimDisconnect: true })],
+      // unstable_shimAsyncInject: OKX/MetaMask inject window.ethereum
+      // asynchronously (ethereum#initialized) — let wagmi wait for it
+      // during reconnect checks instead of reporting "Provider not found".
+      connectors: [injected({ shimDisconnect: true, unstable_shimAsyncInject: true })],
       transports: { [sepolia.id]: http(rpc) },
       ssr: true,
       multiInjectedProviderDiscovery: true,

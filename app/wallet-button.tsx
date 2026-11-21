@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAccount, useConnect, useDisconnect } from 'wagmi';
 import { useAppKit } from '@reown/appkit/react';
 import { appKitEnabled } from '../lib/appkit';
@@ -46,6 +46,21 @@ function AppKitButton() {
   return <appkit-button />;
 }
 
+// EIP-6963 discovered wallets get connector id = their rdns (e.g. OKX is
+// "io.okx.wallet"), never a plain "okx-wallet". The generic injected
+// connector (id "injected") only reads window.ethereum, which OKX does
+// not reliably set — connecting through it throws ProviderNotFoundError
+// while the discovered OKX connector then auto-connects on its own
+// 'connect' event. So: always prefer a discovered wallet over the
+// generic injected one.
+function pickConnector(connectors: any[]) {
+  const discovered = connectors.filter((c: any) => c.id !== 'injected');
+  const okx = discovered.find(
+    (c: any) => c.id === 'io.okx.wallet' || /okx/i.test(c.name || ''),
+  );
+  return okx || discovered[0] || connectors[0];
+}
+
 function FallbackButton({
   isConnected,
   address,
@@ -55,6 +70,9 @@ function FallbackButton({
 }) {
   const { connect, connectors, error: connectError, isPending, reset: resetConnect } = useConnect();
   const { disconnect } = useDisconnect();
+  const [notice, setNotice] = useState('');
+  const connectorsRef = useRef(connectors);
+  connectorsRef.current = connectors;
 
   // wagmi keeps the last connect error even after a retry succeeds.
   useEffect(() => {
@@ -70,24 +88,43 @@ function FallbackButton({
     );
   }
 
-  const onConnect = () => {
-    const c = connectors.find((x: any) => x.id === 'okx-wallet') || connectors[0];
-    if (!c) return;
-    connect({ connector: c });
+  const onConnect = async () => {
+    setNotice('');
+    // Wait for the wallet to finish injecting instead of firing connect()
+    // into a not-yet-present provider (which throws ProviderNotFoundError
+    // and then "connects anyway" when the wallet announces itself).
+    // EIP-6963 wallets like OKX announce asynchronously after page load.
+    for (let i = 0; i < 30; i++) {
+      const c = pickConnector(connectorsRef.current as any[]);
+      if (c && c.id !== 'injected') {
+        connect({ connector: c });
+        return;
+      }
+      if (c && typeof window !== 'undefined' && (window as any).ethereum) {
+        connect({ connector: c });
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    setNotice(
+      'No wallet detected yet — if you use OKX/MetaMask, open it once, then try again.',
+    );
   };
+
+  // ProviderNotFoundError is transient ("wallet still injecting"), not a
+  // failure — never show it as a "connect failed" banner.
+  const showError =
+    connectError &&
+    (connectError as any).name !== 'ProviderNotFoundError' &&
+    !/Provider not found/i.test(connectError.message);
 
   return (
     <div>
-      <button style={btn} disabled={isPending || !connectors.length} onClick={onConnect}>
-        {isPending ? 'connecting…' : connectors.length ? 'connect wallet' : 'no wallet found'}
+      <button style={btn} disabled={isPending} onClick={onConnect}>
+        {isPending ? 'connecting…' : 'connect wallet'}
       </button>
-      {!connectors.length && (
-        <div style={{ opacity: 0.7, fontSize: 13, marginTop: 6 }}>
-          No wallet detected — install MetaMask or OKX Wallet and reload, or set
-          NEXT_PUBLIC_APPKIT_PROJECT_ID to enable all wallets via AppKit.
-        </div>
-      )}
-      {connectError && (
+      {notice && <div style={{ opacity: 0.7, fontSize: 13, marginTop: 6 }}>{notice}</div>}
+      {showError && (
         <div style={{ color: '#ff9', marginTop: 6 }}>connect failed: {connectError.message}</div>
       )}
     </div>
