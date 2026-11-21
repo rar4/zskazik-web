@@ -99,12 +99,12 @@ export default function Casino() {
   // computed every render). Parse safely and gate the buttons instead.
   const wagerWei = safeParseEther(wager);
   const wagerValid = wagerWei !== null && wagerWei > 0n;
-  const { data: balanceData } = useReadContract({
+  const { data: balanceData, refetch: refetchBalance } = useReadContract({
     address: T,
     abi: tokenAbi as any,
     functionName: 'balanceOf',
     args: address ? ([address] as any) : undefined,
-    query: { enabled: !!address && !!T },
+    query: { enabled: !!address && !!T, refetchInterval: 6000 },
   });
   const insufficientBalance = wagerValid && balanceData !== undefined && (balanceData as bigint) < wagerWei!;
   const needApprove = wagerValid && BigInt(allowance || '0') < wagerWei!;
@@ -151,6 +151,10 @@ export default function Casino() {
   const load = async () => {
     const pc = publicClientRef.current;
     if (!pc || !address) return;
+    // Live ZSK balance: refetch on every poll (6s) and after every bet
+    // (load() runs in play()'s finally), so the header updates immediately
+    // when a wager is deducted or a payout lands.
+    refetchBalance();
     try {
       const r = await fetch(`/api/bankroll`);
       const j = await r.json();
