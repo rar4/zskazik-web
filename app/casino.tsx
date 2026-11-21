@@ -12,11 +12,15 @@ import plinkoAbi from '../abi/Plinko.json';
 import WalletButton from './wallet-button';
 import Spinner from './spinner';
 
-const T = (process.env.NEXT_PUBLIC_TOKEN || '') as `0x${string}`;
-const TR = (process.env.NEXT_PUBLIC_TREASURY || '') as `0x${string}`;
-const FL = (process.env.NEXT_PUBLIC_COINFLIP || '') as `0x${string}`;
-const DI = (process.env.NEXT_PUBLIC_DICE || '') as `0x${string}`;
-const PL = (process.env.NEXT_PUBLIC_PLINKO || '') as `0x${string}`;
+const T = (process.env.NEXT_PUBLIC_TOKEN || '0x79d782ffb87a643b9c5369f54f0c1fca02f40a89') as `0x${string}`;
+const TR = (process.env.NEXT_PUBLIC_TREASURY || '0xa84a9505753e0be52486e181bd9dde77d261ad56') as `0x${string}`;
+const FL = (process.env.NEXT_PUBLIC_COINFLIP || '0x22157527b27c4e3174215126c100f66b041cf082') as `0x${string}`;
+const DI = (process.env.NEXT_PUBLIC_DICE || '0xe3192207fa9da7bdbffd09e0f01fb49c14e59b04') as `0x${string}`;
+const PL = (process.env.NEXT_PUBLIC_PLINKO || '0x1a2a89bfdd940b34f62237b6ccb4b8d2644a37cd') as `0x${string}`;
+// Fallbacks = the deployed Sepolia addresses (broadcast/*/11155111 in the
+// contracts repo). Without them a missing NEXT_PUBLIC_* env var made T/TR/…
+// '' and writeContract sent approve calldata with an empty `to` — MetaMask
+// interprets that as a contract CREATION and the tx runs out of gas.
 
 // Explicit gas limits, measured from real Sepolia receipts (approve 128k,
 // place 1.09–1.18M, resolve 335–539k) with headroom. Without them the
@@ -114,6 +118,10 @@ export default function Casino() {
 
   const approve = async () => {
     if (!wallet || approving) return;
+    if (!T || !TR) {
+      setMsg('config error: contract addresses missing');
+      return;
+    }
     if (wrongChain) {
       setMsg('switching to Sepolia first…');
       switchChain({ chainId: sepolia.id });
@@ -156,6 +164,10 @@ export default function Casino() {
 
   const play = async () => {
     if (!wallet) return;
+    if (!FL || !DI || !PL) {
+      setMsg('config error: game contract addresses missing');
+      return;
+    }
     if (wrongChain) {
       setMsg('switching to Sepolia first…');
       switchChain({ chainId: sepolia.id });
