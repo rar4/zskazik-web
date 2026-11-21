@@ -20,11 +20,10 @@ const CHUNK = 40_000n;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function getLogsChunked(address: `0x${string}`, event: any) {
-  // -30: public RPCs are load-balanced and backends lag each other by
-  // many blocks — a scan to the reported head intermittently misses the
-  // newest logs on lagging backends. History lagging ~6 min is harmless
-  // (the UI re-polls every 6s).
-  const toBlock = (await client.getBlockNumber()) - 30n;
+  // -2: resolve requires block > placeBlock, so once a bet is 2 blocks
+  // old it can settle. The old -30 margin hid fresh bets for ~60s on
+  // Base Sepolia (2s blocks) and delayed the resolve poll loop.
+  const toBlock = (await client.getBlockNumber()) - 2n;
   const out: any[] = [];
   for (let from = START_BLOCK; from <= toBlock; from += CHUNK) {
     const to = from + CHUNK - 1n < toBlock ? from + CHUNK - 1n : toBlock;
@@ -90,8 +89,15 @@ export async function loadAllBets(player?: string, game?: string): Promise<Bet[]
     for (const a of diceAddrs) out.push(...await loadGame(a, EV.rollPlaced, EV.rollResolved, 'dice', player));
   }
   if (!game || game === 'plinko') {
-    if (!isZeroAddr(ADDR.plinko)) out.push(...await loadGame(ADDR.plinko, EV.dropPlaced, EV.dropResolved, 'plinko', player));
+    const plinkoAddrs = [ADDR.plinko, ADDR_OLD.plinko].filter((a) => !isZeroAddr(a));
+    for (const a of plinkoAddrs) out.push(...await loadGame(a, EV.dropPlaced, EV.dropResolved, 'plinko', player));
   }
   out.sort((a, b) => b.block_number - a.block_number);
-  return out;
+  // Dedupe by gameBetId (paranoia: same bet must never appear twice).
+  const seen = new Set<string>();
+  return out.filter((b) => {
+    if (seen.has(b.game_bet_id)) return false;
+    seen.add(b.game_bet_id);
+    return true;
+  });
 }

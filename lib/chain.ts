@@ -18,11 +18,13 @@ export function isZeroAddr(a: string) {
   return !a || a === '0x0000000000000000000000000000000000000000';
 }
 
-// Base Sepolia has a single game generation — no revoked predecessors.
-// Kept as zero addresses so loadAllBets scans only the current contracts.
+// Base Sepolia has two game generations: the first deployment (direct
+// bets, before the ERC-2771 forwarder) and the current forwarder-enabled
+// one. History scans both so old bets stay visible after redeploys.
 export const ADDR_OLD = {
-  coinflip: '0x0000000000000000000000000000000000000000' as `0x${string}`,
-  dice: '0x0000000000000000000000000000000000000000' as `0x${string}`,
+  coinflip: '0x22157527B27C4E3174215126c100f66B041cF082' as `0x${string}`,
+  dice: '0xe3192207Fa9Da7BdBFfd09E0F01FB49C14E59b04' as `0x${string}`,
+  plinko: '0x1a2a89BFDD940B34f62237b6cCb4b8D2644a37cD' as `0x${string}`,
 };
 
 export const client = createPublicClient({
