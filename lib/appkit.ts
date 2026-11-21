@@ -1,5 +1,5 @@
 import { createConfig, http, injected } from '@wagmi/core';
-import { sepolia } from 'viem/chains';
+import { baseSepolia } from 'viem/chains';
 import { WagmiAdapter } from '@reown/appkit-adapter-wagmi';
 import { createAppKit } from '@reown/appkit/react';
 import type { AppKitNetwork } from '@reown/appkit/networks';
@@ -15,7 +15,7 @@ export const appKitEnabled = Boolean(projectId);
 
 const rpc =
   process.env.NEXT_PUBLIC_RPC_URL ||
-  'https://ethereum-sepolia-rpc.publicnode.com';
+  'https://sepolia.base.org';
 
 // Public origin of this app. Must match the domain allowlisted in the Reown
 // dashboard, otherwise WalletConnect universal links/deep links refuse to open.
@@ -24,14 +24,14 @@ export const appUrl =
 
 export const metadata = {
   name: 'ZSKazik',
-  description: 'On-chain casino on Sepolia: CoinFlip, Dice, Plinko',
+  description: 'On-chain casino on Base Sepolia: CoinFlip, Dice, Plinko',
   url: appUrl,
   icons: [`${appUrl}/icon.svg`],
 };
 
-// Sepolia only: every contract this app talks to is deployed there, so the
+// Base Sepolia only: every contract this app talks to is deployed there, so the
 // modal must never offer to connect on any other chain.
-export const networks = [sepolia] as unknown as [AppKitNetwork, ...AppKitNetwork[]];
+export const networks = [baseSepolia] as unknown as [AppKitNetwork, ...AppKitNetwork[]];
 
 // With a project id, WagmiAdapter owns the wagmi config and registers the
 // connectors AppKit's modal needs: WalletConnect (500+ mobile / QR wallets),
@@ -44,14 +44,14 @@ export const wagmiAdapter = appKitEnabled
       networks,
       projectId,
       ssr: true,
-      transports: { [sepolia.id]: http(rpc) },
+      transports: { [baseSepolia.id]: http(rpc) },
     })
   : undefined;
 
 export const wagmiConfig = wagmiAdapter
   ? wagmiAdapter.wagmiConfig
   : createConfig({
-      chains: [sepolia],
+      chains: [baseSepolia],
       // Single injected connector. With multiInjectedProviderDiscovery,
       // MetaMask/OKX/Rabby etc. show up automatically as their own
       // EIP-6963 connectors — a second hand-made injected() wrapper
@@ -60,7 +60,7 @@ export const wagmiConfig = wagmiAdapter
       // asynchronously (ethereum#initialized) — let wagmi wait for it
       // during reconnect checks instead of reporting "Provider not found".
       connectors: [injected({ shimDisconnect: true, unstable_shimAsyncInject: true })],
-      transports: { [sepolia.id]: http(rpc) },
+      transports: { [baseSepolia.id]: http(rpc) },
       ssr: true,
       multiInjectedProviderDiscovery: true,
     });
@@ -72,7 +72,7 @@ export const modal = appKitEnabled
   ? createAppKit({
       adapters: [wagmiAdapter!],
       networks,
-      defaultNetwork: sepolia as unknown as AppKitNetwork,
+      defaultNetwork: baseSepolia as unknown as AppKitNetwork,
       projectId,
       metadata,
       themeMode: 'dark',

@@ -1,15 +1,15 @@
 import { createPublicClient, fallback, http, parseAbiItem } from 'viem';
 
-export const RPC_URL = process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
-export const START_BLOCK = BigInt(process.env.START_BLOCK || '12180054');
+export const RPC_URL = process.env.RPC_URL || 'https://sepolia.base.org';
+export const START_BLOCK = BigInt(process.env.START_BLOCK || '61788600');
 
-// Fallbacks = deployed Sepolia addresses (broadcast/*/11155111 in the
+// Fallbacks = deployed Base Sepolia addresses (broadcast/*/84532 in the
 // contracts repo) — a missing env var must never silently zero these out.
 export const ADDR = {
   token: (process.env.NEXT_PUBLIC_TOKEN || '0x79d782ffb87a643b9c5369f54f0c1fca02f40a89') as `0x${string}`,
   treasury: (process.env.NEXT_PUBLIC_TREASURY || '0xa84a9505753e0be52486e181bd9dde77d261ad56') as `0x${string}`,
-  coinflip: (process.env.NEXT_PUBLIC_COINFLIP || '0x3ca2AeC906EbBCf550619e29389e9Bd440ef268B') as `0x${string}`,
-  dice: (process.env.NEXT_PUBLIC_DICE || '0xF4Bf21af01451dc3eF1196C4F3b176F1969004bc') as `0x${string}`,
+  coinflip: (process.env.NEXT_PUBLIC_COINFLIP || '0x22157527B27C4E3174215126c100f66B041cF082') as `0x${string}`,
+  dice: (process.env.NEXT_PUBLIC_DICE || '0xe3192207Fa9Da7BdBFfd09E0F01FB49C14E59b04') as `0x${string}`,
   plinko: (process.env.NEXT_PUBLIC_PLINKO || '0x1a2a89bfdd940b34f62237b6ccb4b8d2644a37cd') as `0x${string}`,
 };
 
@@ -17,22 +17,22 @@ export function isZeroAddr(a: string) {
   return !a || a === '0x0000000000000000000000000000000000000000';
 }
 
-// Pre-v2 game contracts (revoked in Treasury). Their historical bets must
-// stay visible in history/stats, so the API scans both generations.
+// Base Sepolia has a single game generation — no revoked predecessors.
+// Kept as zero addresses so loadAllBets scans only the current contracts.
 export const ADDR_OLD = {
-  coinflip: '0x22157527B27C4E3174215126c100f66B041cF082' as `0x${string}`,
-  dice: '0xe3192207Fa9Da7BdBFfd09E0F01FB49C14E59b04' as `0x${string}`,
+  coinflip: '0x0000000000000000000000000000000000000000' as `0x${string}`,
+  dice: '0x0000000000000000000000000000000000000000' as `0x${string}`,
 };
 
 export const client = createPublicClient({
-  // Fallback across public Sepolia endpoints: single-endpoint scans
+  // Fallback across public Base Sepolia endpoints: single-endpoint scans
   // intermittently return partial/empty log pages (lagging or throttled
   // backends). viem's fallback transport moves to the next URL on error.
   transport: fallback(
     [
       RPC_URL,
-      'https://ethereum-sepolia-rpc.publicnode.com',
-      'https://1rpc.io/sepolia',
+      'https://sepolia.base.org',
+      'https://base-sepolia-rpc.publicnode.com',
     ]
       .filter((u, i, a) => a.indexOf(u) === i)
       .map((u) => http(u, { timeout: 10_000 })),

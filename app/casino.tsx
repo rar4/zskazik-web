@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAccount, usePublicClient, useReadContract, useSwitchChain, useWalletClient } from 'wagmi';
 import { parseEther, formatEther, parseEventLogs } from 'viem';
-import { sepolia } from 'viem/chains';
+import { baseSepolia } from 'viem/chains';
 import tokenAbi from '../abi/CasinoToken.json';
 import treasuryAbi from '../abi/Treasury.json';
 import flipAbi from '../abi/CoinFlip.json';
@@ -14,15 +14,15 @@ import Spinner from './spinner';
 
 const T = (process.env.NEXT_PUBLIC_TOKEN || '0x79d782ffb87a643b9c5369f54f0c1fca02f40a89') as `0x${string}`;
 const TR = (process.env.NEXT_PUBLIC_TREASURY || '0xa84a9505753e0be52486e181bd9dde77d261ad56') as `0x${string}`;
-const FL = (process.env.NEXT_PUBLIC_COINFLIP || '0x3ca2AeC906EbBCf550619e29389e9Bd440ef268B') as `0x${string}`;
-const DI = (process.env.NEXT_PUBLIC_DICE || '0xF4Bf21af01451dc3eF1196C4F3b176F1969004bc') as `0x${string}`;
+const FL = (process.env.NEXT_PUBLIC_COINFLIP || '0x22157527B27C4E3174215126c100f66B041cF082') as `0x${string}`;
+const DI = (process.env.NEXT_PUBLIC_DICE || '0xe3192207Fa9Da7BdBFfd09E0F01FB49C14E59b04') as `0x${string}`;
 const PL = (process.env.NEXT_PUBLIC_PLINKO || '0x1a2a89bfdd940b34f62237b6ccb4b8d2644a37cd') as `0x${string}`;
-// Fallbacks = the deployed Sepolia addresses (broadcast/*/11155111 in the
+// Fallbacks = the deployed Base Sepolia addresses (broadcast/*/84532 in the
 // contracts repo). Without them a missing NEXT_PUBLIC_* env var made T/TR/…
 // '' and writeContract sent approve calldata with an empty `to` — MetaMask
 // interprets that as a contract CREATION and the tx runs out of gas.
 
-// Explicit gas limits, measured from real Sepolia receipts (approve 128k,
+// Explicit gas limits, measured from real Base Sepolia receipts (approve 128k,
 // place 1.09–1.18M, resolve 335–539k) with headroom. Without them the
 // wallet must estimate gas itself — OKX frequently fails that step with
 // "network fee estimation unsuccessful" even though the tx is valid.
@@ -52,13 +52,13 @@ const S = {
 export default function Casino() {
   const { address, isConnected, chainId } = useAccount();
   const { switchChain, isPending: isSwitching } = useSwitchChain();
-  const wrongChain = isConnected && chainId !== sepolia.id;
+  const wrongChain = isConnected && chainId !== baseSepolia.id;
 
   // Wallet connects on whatever chain it was left on (often mainnet).
-  // Auto-switch to Sepolia so writes don't fail the chain check.
+  // Auto-switch to Base Sepolia so writes don't fail the chain check.
   useEffect(() => {
     if (wrongChain) {
-      switchChain({ chainId: sepolia.id });
+      switchChain({ chainId: baseSepolia.id });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wrongChain]);
@@ -142,8 +142,8 @@ export default function Casino() {
       return;
     }
     if (wrongChain) {
-      setMsg('switching to Sepolia first…');
-      switchChain({ chainId: sepolia.id });
+      setMsg('switching to Base Sepolia first…');
+      switchChain({ chainId: baseSepolia.id });
       return;
     }
     setApproving(true);
@@ -196,8 +196,8 @@ export default function Casino() {
       return;
     }
     if (wrongChain) {
-      setMsg('switching to Sepolia first…');
-      switchChain({ chainId: sepolia.id });
+      setMsg('switching to Base Sepolia first…');
+      switchChain({ chainId: baseSepolia.id });
       return;
     }
     setMsg('');
@@ -260,9 +260,9 @@ export default function Casino() {
       </div>
       {wrongChain && (
         <div style={{ background: '#4a2b00', border: '1px solid #b97a1a', padding: 12, borderRadius: 10, marginTop: 12 }}>
-          ⚠️ Wallet is on chain {chainId} (mainnet) — this casino runs on <b>Sepolia</b>.{' '}
-          <button style={S.btn} disabled={isSwitching} onClick={() => switchChain({ chainId: sepolia.id })}>
-            {isSwitching ? 'switching…' : 'Switch to Sepolia'}
+          ⚠️ Wallet is on chain {chainId} (mainnet) — this casino runs on <b>Base Sepolia</b>.{' '}
+          <button style={S.btn} disabled={isSwitching} onClick={() => switchChain({ chainId: baseSepolia.id })}>
+            {isSwitching ? 'switching…' : 'Switch to Base Sepolia'}
           </button>
         </div>
       )}
