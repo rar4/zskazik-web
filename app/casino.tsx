@@ -1,14 +1,15 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useAccount, useConnect, useDisconnect, usePublicClient, useSwitchChain, useWalletClient } from 'wagmi';
-import { parseEther, formatEther } from 'viem';
+import { useAccount, usePublicClient, useSwitchChain, useWalletClient } from 'wagmi';
+import { parseEther, formatEther, parseEventLogs } from 'viem';
 import { sepolia } from 'viem/chains';
 import tokenAbi from '../abi/CasinoToken.json';
 import treasuryAbi from '../abi/Treasury.json';
 import flipAbi from '../abi/CoinFlip.json';
 import diceAbi from '../abi/Dice.json';
 import plinkoAbi from '../abi/Plinko.json';
+import WalletButton from './wallet-button';
 
 const T = (process.env.NEXT_PUBLIC_TOKEN || '') as `0x${string}`;
 const TR = (process.env.NEXT_PUBLIC_TREASURY || '') as `0x${string}`;
@@ -36,18 +37,8 @@ const S = {
 
 export default function Casino() {
   const { address, isConnected, chainId } = useAccount();
-  const { connect, connectors, error: connectError, isPending, reset: resetConnect } = useConnect();
-  const { disconnect } = useDisconnect();
   const { switchChain, isPending: isSwitching } = useSwitchChain();
   const wrongChain = isConnected && chainId !== sepolia.id;
-
-  // wagmi keeps the last connect error even after a retry succeeds —
-  // clear it as soon as we're connected so a stale "connect failed"
-  // banner doesn't show next to a working session.
-  useEffect(() => {
-    if (isConnected) resetConnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isConnected]);
 
   // Wallet connects on whatever chain it was left on (often mainnet).
   // Auto-switch to Sepolia so writes don't fail the chain check.
@@ -137,21 +128,21 @@ export default function Casino() {
       let gameId: `0x${string}`;
       if (tab === 'flip') {
         const h = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'flip', args: [choice, w] } as any);
-        gameId = parseGameId(await publicClient!.waitForTransactionReceipt({ hash: h }));
+        gameId = parseGameId(await publicClient!.waitForTransactionReceipt({ hash: h }), flipAbi, 'FlipPlaced');
         setPending(gameId); setMsg('flipped — resolving…');
         await waitBlocks(2);
         const rh = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'resolve', args: [gameId] } as any);
         await publicClient!.waitForTransactionReceipt({ hash: rh });
       } else if (tab === 'dice') {
         const h = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'roll', args: [target, w] } as any);
-        gameId = parseGameId(await publicClient!.waitForTransactionReceipt({ hash: h }));
+        gameId = parseGameId(await publicClient!.waitForTransactionReceipt({ hash: h }), diceAbi, 'RollPlaced');
         setPending(gameId); setMsg('rolled — resolving…');
         await waitBlocks(2);
         const rh = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'resolve', args: [gameId] } as any);
         await publicClient!.waitForTransactionReceipt({ hash: rh });
       } else {
         const h = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'drop', args: [rows, w] } as any);
-        gameId = parseGameId(await publicClient!.waitForTransactionReceipt({ hash: h }));
+        gameId = parseGameId(await publicClient!.waitForTransactionReceipt({ hash: h }), plinkoAbi, 'DropPlaced');
         setPending(gameId); setMsg('dropped — resolving…');
         await waitBlocks(2);
         const rh = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'resolve', args: [gameId] } as any);
@@ -165,33 +156,12 @@ export default function Casino() {
     }
   };
 
-  const onConnect = (connector?: any) => {
-    setMsg('');
-    const c = connector || connectors.find((x: any) => x.id === 'okx-wallet') || connectors[0];
-    if (!c) {
-      setMsg('No wallet found — install OKX Wallet or MetaMask and open this page in the same browser.');
-      return;
-    }
-    connect({ connector: c });
-  };
-
   return (
     <div style={S.page}>
       <div style={S.header}>
         <h1>🎰 ZSKazik</h1>
-        {isConnected ? (
-          <button style={S.btn} onClick={() => disconnect()}>{address?.slice(0, 8)}… disconnect</button>
-        ) : (
-          <div style={S.row}>
-            <button style={S.btn} disabled={isPending} onClick={() => onConnect(connectors.find((x: any) => x.id === 'okx-wallet'))}>{isPending ? 'connecting…' : 'connect OKX Wallet'}</button>
-            <button style={S.btn} disabled={isPending} onClick={() => onConnect(connectors.find((x: any) => x.id !== 'okx-wallet') || connectors[0])}>connect wallet</button>
-          </div>
-        )}
+        <WalletButton />
       </div>
-      <div style={S.muted}>
-        {connectors.map((c: any) => <span key={c.uid} style={{ marginRight: 8 }}>{c.name} ({c.id})</span>)}
-      </div>
-      {connectError && !isConnected && <div style={{ color: '#ff9', marginTop: 8 }}>connect failed: {connectError.message} — install MetaMask and try again in the same browser.</div>}
       {wrongChain && (
         <div style={{ background: '#4a2b00', border: '1px solid #b97a1a', padding: 12, borderRadius: 10, marginTop: 12 }}>
           ⚠️ Wallet is on chain {chainId} (mainnet) — this casino runs on <b>Sepolia</b>.{' '}
@@ -252,11 +222,15 @@ function fmt(w: string) {
   try { return Number(formatEther(BigInt(w))).toLocaleString(); } catch { return w; }
 }
 
-function parseGameId(rc: any): `0x${string}` {
-  for (const log of rc.logs) {
-    if (log.topics && log.topics.length >= 2 && log.topics[1]?.length === 66) {
-      return log.topics[1] as `0x${string}`;
-    }
-  }
-  throw new Error('gameBetId not found in receipt');
+function parseGameId(rc: any, abi: any, placedEvent: string): `0x${string}` {
+  // The place tx emits THREE logs with a bytes32/address in topic1, in order:
+  // ERC20 Transfer (escrow pull), Treasury BetEscrowed (treasuryBetId), then
+  // the game's *Placed event (gameBetId). Picking "the first log with a
+  // 32-byte topic1" — the old logic — returned the Transfer's `from`
+  // address, so resolve() reverted BetNotFound and the wager stayed stuck
+  // in escrow. Decode by event name instead so only *Placed matches.
+  const parsed = parseEventLogs({ abi, logs: rc.logs }) as any[];
+  const placed = parsed.find((e) => e.eventName === placedEvent);
+  if (placed) return placed.args.gameBetId as `0x${string}`;
+  throw new Error(placedEvent + ' not found in receipt');
 }

@@ -1,0 +1,42 @@
+# Deploy to Vercel on every push to main.
+#
+# Why this exists: the Vercel project (zskazik-web) was created via CLI and
+# is NOT connected to this GitHub repo, so a plain `git push` never produced
+# a deployment. This workflow closes that gap by running `vercel deploy
+# --prod` against the existing project on each push.
+#
+# One-time setup (the only manual step):
+#   1. Create a token at https://vercel.com/account/tokens (scope: the
+#      Sania team, full account access is fine for a hobby project).
+#   2. Add it as a GitHub repo secret named VERCEL_TOKEN:
+#      Settings -> Secrets and variables -> Actions -> New repository secret
+#      (or: gh secret set VERCEL_TOKEN)
+# VERCEL_ORG_ID / VERCEL_PROJECT_ID below are plain identifiers (also in
+# .vercel/project.json, which is gitignored) and are not secrets.
+#
+# Alternative permanent fix: connect the repo in the Vercel dashboard
+# (Project -> Settings -> Git -> Connect Git Repository). Once connected,
+# pushes deploy natively via Vercel's GitHub integration and this workflow
+# can be deleted.
+name: deploy-vercel
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_ORG_ID: team_kN4wbnrdrKn8pqJ4bsKYxHqI
+      VERCEL_PROJECT_ID: prj_WoWrTGYxioR77sP3raWs7D5MB2hZ
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Deploy to Vercel (production)
+        run: |
+          npm install -g vercel@latest
+          vercel deploy --prod --yes --token="${{ secrets.VERCEL_TOKEN }}"

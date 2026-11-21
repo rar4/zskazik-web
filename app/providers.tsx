@@ -1,36 +1,27 @@
 'use client';
 
-import { WagmiProvider, createConfig, http } from 'wagmi';
-import { sepolia } from 'viem/chains';
+import { useState, type ReactNode } from 'react';
+import { WagmiProvider, cookieToInitialState, type Config } from 'wagmi';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { injected } from 'wagmi/connectors';
-import { walletConnect } from 'wagmi/connectors';
-import { useState } from 'react';
+// Importing lib/appkit creates the wagmi adapter/config and, when a project
+// id is set, the AppKit modal singleton (module scope, exactly once).
+import { wagmiConfig } from '../lib/appkit';
 
-const rpc = process.env.NEXT_PUBLIC_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com';
-const wcProjectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || '';
-
-export function Providers({ children }: { children: React.ReactNode }) {
-  const [config] = useState(() => {
-    // Single injected connector. With multiInjectedProviderDiscovery,
-    // OKX Wallet shows up automatically as its own EIP-6963 connector
-    // (id "okx-wallet") — a second fake injected() wrapper around the
-    // same provider made connect() race and surface a phantom error.
-    const connectors: any[] = [injected({ shimDisconnect: true })];
-    if (wcProjectId) connectors.push(walletConnect({ projectId: wcProjectId }));
-    return createConfig({
-      chains: [sepolia],
-      connectors,
-      transports: { [sepolia.id]: http(rpc) },
-      // If the wallet is on another chain (e.g. mainnet), don't fail the
-      // connect — let the UI prompt a switch to Sepolia.
-      multiInjectedProviderDiscovery: true,
-    });
-  });
-  const [qc] = useState(() => new QueryClient());
+export function Providers({
+  children,
+  cookies,
+}: {
+  children: ReactNode;
+  cookies?: string | null;
+}) {
+  const [queryClient] = useState(() => new QueryClient());
+  // Cookie hydration: with ssr:true wagmi persists the connection in a
+  // cookie, so a reconnecting wallet renders the same state on server and
+  // client instead of flashing "connect" on every reload.
+  const initialState = cookieToInitialState(wagmiConfig as Config, cookies);
   return (
-    <WagmiProvider config={config}>
-      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    <WagmiProvider config={wagmiConfig as Config} initialState={initialState}>
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     </WagmiProvider>
   );
 }
