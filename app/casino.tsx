@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useAccount, usePublicClient, useSwitchChain, useWalletClient } from 'wagmi';
+import { useEffect, useRef, useState } from 'react';
+import { useAccount, usePublicClient, useReadContract, useSwitchChain, useWalletClient } from 'wagmi';
 import { parseEther, formatEther, parseEventLogs } from 'viem';
 import { sepolia } from 'viem/chains';
 import tokenAbi from '../abi/CasinoToken.json';
@@ -68,18 +68,30 @@ export default function Casino() {
   const [pending, setPending] = useState<string | null>(null);
   const [approving, setApproving] = useState(false);
   const [msg, setMsg] = useState('');
-  const [allowance, setAllowance] = useState('0');
   const [bankroll, setBankroll] = useState('0');
   const [bets, setBets] = useState<Bet[]>([]);
 
+  // Allowance via react-query: refetches automatically when the connected
+  // chain (and thus the public client) changes. The old hand-rolled poll
+  // captured the publicClient from the render when the address first
+  // appeared — for a wallet left on mainnet that client is undefined
+  // (chain not configured), so the poller early-returned forever and the
+  // UI kept asking to "approve again" even after a successful approve.
+  const { data: allowanceData, refetch: refetchAllowance } = useReadContract({
+    address: T,
+    abi: tokenAbi as any,
+    functionName: 'allowance',
+    args: address ? ([address, TR] as any) : undefined,
+    query: { enabled: !!address && !!T },
+  });
+  const allowance = allowanceData?.toString() ?? '0';
+
+  const publicClientRef = useRef(publicClient);
+  publicClientRef.current = publicClient;
+
   const load = async () => {
-    if (!publicClient || !address) return;
-    try {
-      const al = (await publicClient.readContract({
-        address: T, abi: tokenAbi, functionName: 'allowance', args: [address, TR],
-      } as any)) as bigint;
-      setAllowance(al.toString());
-    } catch {}
+    const pc = publicClientRef.current;
+    if (!pc || !address) return;
     try {
       const r = await fetch(`/api/bankroll`);
       const j = await r.json();
@@ -117,6 +129,15 @@ export default function Casino() {
         args: [TR, parseEther(wager || '0')], gas: GAS_APPROVE,
       } as any);
       await publicClient!.waitForTransactionReceipt({ hash });
+      // The RPC can lag a block behind the receipt — poll the allowance
+      // refetch until it reflects the approval (or give up after ~10s,
+      // the 6s background poll + this query's refetch will catch up).
+      const want = parseEther(wager || '0');
+      for (let i = 0; i < 5; i++) {
+        const r = await refetchAllowance();
+        if (r.data && (r.data as bigint) >= want) break;
+        await new Promise((res) => setTimeout(res, 2000));
+      }
       setMsg('approved ✓ now place your bet');
       load();
     } catch (e: any) {
