@@ -219,7 +219,7 @@ export default function Casino() {
   const waitBlocks = async (n: number) => {
     const start = await publicClient!.getBlockNumber();
     while ((await publicClient!.getBlockNumber()) < start + BigInt(n)) {
-      await new Promise((r) => setTimeout(r, 800));
+      await new Promise((r) => setTimeout(r, 250));
     }
   };
 
@@ -277,6 +277,29 @@ export default function Casino() {
         });
         const j = await res.json();
         if (!res.ok) throw new Error(j.error || 'relay failed');
+        setMsg('placed ✓ resolving…');
+        load();
+        // Settlement: poll until the bet is settled, triggering the
+        // relayer resolve via /api/resolve once it's >1 block old.
+        // Polls every 2s instead of the 6s background interval, so
+        // click-to-result is ~2 blocks (~4s) instead of ~10s+.
+        if (j.gameBetId) {
+          for (let i = 0; i < 15; i++) {
+            await new Promise((r) => setTimeout(r, 2000));
+            const br = await fetch(`/api/bets?player=${address}&limit=20`);
+            const bd = await br.json().catch(() => []);
+            const bet = Array.isArray(bd) ? bd.find((b: any) => b.game_bet_id === j.gameBetId) : null;
+            if (bet && bet.status === 'escrowed' && i >= 1) {
+              await fetch('/api/resolve', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ gameBetId: j.gameBetId, target: targetAddr }),
+              }).catch(() => {});
+            }
+            if (bet && bet.status !== 'escrowed') break;
+            load();
+          }
+        }
         setMsg('settled ✓ check history');
         return;
       } catch (e: any) {

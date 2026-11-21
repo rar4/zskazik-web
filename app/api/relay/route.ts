@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { createPublicClient, createWalletClient, http, parseAbi, type Hex } from 'viem';
+import { createWalletClient, http, parseAbi, parseEventLogs, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { baseSepolia } from 'viem/chains';
 import { ADDR, client } from '@/lib/chain';
@@ -7,9 +7,13 @@ import { ADDR, client } from '@/lib/chain';
 export const dynamic = 'force-dynamic';
 
 // Relayer: submits session-signed meta-bets via TrustedForwarder (gas paid by
-// RELAYER_PRIVATE_KEY, server-only) and auto-resolves 2 blocks later.
+// RELAYER_PRIVATE_KEY, server-only) and auto-resolves in the background.
 // The relayer cannot change bet params - the session signature binds
 // (user, target, calldata, nonce) and the Forwarder verifies it on-chain.
+//
+// Latency: the POST returns as soon as the place tx is mined (~1 block).
+// The frontend polls and calls /api/resolve once the bet is >1 block old,
+// so click-to-placed is ~1 block (~2s) and settlement follows async.
 
 const forwarderAbi = parseAbi([
   'function executeMetaTransaction(address user, address target, bytes callData, bytes signature) returns (bytes)',
@@ -23,18 +27,15 @@ const gameAbi = parseAbi([
   'event DropPlaced(bytes32 indexed gameBetId, address indexed player, uint256 wager, uint8 rows)',
 ]);
 
+// Fast RPC for the relayer: publicnode allows wide getLogs ranges and is
+// low-latency; sepolia.base.org caps getLogs at 200 blocks.
+const RPC = 'https://base-sepolia-rpc.publicnode.com';
+
 function relayer() {
   const pk = process.env.RELAYER_PRIVATE_KEY;
   if (!pk) throw new Error('RELAYER_PRIVATE_KEY not configured');
   const account = privateKeyToAccount(pk as Hex);
-  return createWalletClient({ account, chain: baseSepolia, transport: http(process.env.RPC_URL || 'https://sepolia.base.org') });
-}
-
-async function waitBlocks(n: number) {
-  const start = await client.getBlockNumber();
-  while ((await client.getBlockNumber()) < start + BigInt(n)) {
-    await new Promise((r) => setTimeout(r, 800));
-  }
+  return createWalletClient({ account, chain: baseSepolia, transport: http(RPC) });
 }
 
 export async function POST(req: Request) {
@@ -58,23 +59,12 @@ export async function POST(req: Request) {
     if (receipt.status !== 'success') {
       return NextResponse.json({ error: 'meta-tx reverted', hash }, { status: 500 });
     }
-    // Find the placed gameBetId from the receipt logs, then auto-resolve.
-    const { parseEventLogs } = await import('viem');
     const logs = parseEventLogs({ abi: gameAbi, logs: receipt.logs }) as any[];
     const placed = logs.find((l) => ['FlipPlaced', 'RollPlaced', 'DropPlaced'].includes(l.eventName));
-    let gameBetId: string | null = placed?.args?.gameBetId ?? null;
-    let resolveHash: string | null = null;
-    if (gameBetId) {
-      await waitBlocks(2);
-      resolveHash = await wallet.writeContract({
-        address: target,
-        abi: gameAbi as any,
-        functionName: 'resolve',
-        args: [gameBetId],
-      } as any);
-      await client.waitForTransactionReceipt({ hash: resolveHash as Hex });
-    }
-    return NextResponse.json({ hash, gameBetId, resolveHash });
+    const gameBetId: string | null = placed?.args?.gameBetId ?? null;
+    // Return immediately - the frontend polls and triggers /api/resolve
+    // once the bet is >1 block old, so click-to-placed is ~1 block (~2s).
+    return NextResponse.json({ hash, gameBetId });
   } catch (e: any) {
     return NextResponse.json({ error: String(e.shortMessage || e.message || e) }, { status: 500 });
   }
