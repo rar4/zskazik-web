@@ -229,16 +229,15 @@ export default function Casino() {
     }
     setMsg('');
     setPlacing(true);
-    // Single-button flow: first click does the one-time setup (approve +
-    // session authorisation, 2 popups), then places the bet. Later clicks
-    // skip straight to the 0-popup meta bet.
-    if (needApprove) {
-      const ok = await ensureApproved();
-      if (!ok) { setPlacing(false); return; }
-    }
-    if (!sessionActive) {
-      const ok = await ensureSession();
-      if (!ok) { setPlacing(false); return; }
+    // Registration first: this click only registers (approve + session
+    // authorisation, 2 popups) and does NOT bet. Bets are placed only
+    // after registration, by the next click.
+    if (needApprove || !sessionActive) {
+      if (needApprove && !(await ensureApproved())) { setPlacing(false); return; }
+      if (!(await ensureSession())) { setPlacing(false); return; }
+      setPlacing(false);
+      setMsg('registered ✓ now click bet to play');
+      return;
     }
     // 0-popup path: session key signs off-chain, relayer submits + resolves.
     if (address) {
@@ -370,7 +369,7 @@ export default function Casino() {
           {tab === 'plinko' && <div style={S.muted}>pays by bin table, up to 16x on 16 rows</div>}
           <div style={S.row}>
             <button style={{ ...S.btn, opacity: (pending || placing || approving || settingUp) ? 0.7 : 1, cursor: (pending || placing || approving || settingUp) ? 'wait' : 'pointer' }} disabled={!isConnected || pending !== null || placing || approving || settingUp || wrongChain || !wagerValid || insufficientBalance} onClick={play}>
-              {placing || approving || settingUp ? <><Spinner />{approving ? 'approving…' : settingUp ? 'enabling…' : 'placing…'}</> : sessionActive && !needApprove ? 'bet' : 'bet (first time: 2 confirmations)'}
+              {placing || approving || settingUp ? <><Spinner />{approving ? 'approving…' : settingUp ? 'registering…' : 'placing…'}</> : sessionActive && !needApprove ? 'bet' : 'register (2 confirmations)'}
             </button>
           </div>
           {isConnected && sessionActive && !needApprove && <div style={S.muted}>1-click betting on — bets need 0 popups for 30 days</div>}
