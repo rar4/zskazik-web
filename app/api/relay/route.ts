@@ -7,13 +7,9 @@ import { ADDR, client } from '@/lib/chain';
 export const dynamic = 'force-dynamic';
 
 // Relayer: submits session-signed meta-bets via TrustedForwarder (gas paid by
-// RELAYER_PRIVATE_KEY, server-only) and auto-resolves in the background.
-// The relayer cannot change bet params - the session signature binds
-// (user, target, calldata, nonce) and the Forwarder verifies it on-chain.
-//
-// Latency: the POST returns as soon as the place tx is mined (~1 block).
-// The frontend polls and calls /api/resolve once the bet is >1 block old,
-// so click-to-placed is ~1 block (~2s) and settlement follows async.
+// RELAYER_PRIVATE_KEY, server-only) and auto-resolves 2 blocks later in the
+// same request. The relayer cannot change bet params - the session signature
+// binds (user, target, calldata, nonce) and the Forwarder verifies it on-chain.
 
 const forwarderAbi = parseAbi([
   'function executeMetaTransaction(address user, address target, bytes callData, bytes signature) returns (bytes)',
@@ -36,6 +32,13 @@ function relayer() {
   if (!pk) throw new Error('RELAYER_PRIVATE_KEY not configured');
   const account = privateKeyToAccount(pk as Hex);
   return createWalletClient({ account, chain: baseSepolia, transport: http(RPC) });
+}
+
+async function waitBlocks(n: number) {
+  const start = await client.getBlockNumber();
+  while ((await client.getBlockNumber()) < start + BigInt(n)) {
+    await new Promise((r) => setTimeout(r, 800));
+  }
 }
 
 export async function POST(req: Request) {
@@ -61,10 +64,19 @@ export async function POST(req: Request) {
     }
     const logs = parseEventLogs({ abi: gameAbi, logs: receipt.logs }) as any[];
     const placed = logs.find((l) => ['FlipPlaced', 'RollPlaced', 'DropPlaced'].includes(l.eventName));
-    const gameBetId: string | null = placed?.args?.gameBetId ?? null;
-    // Return immediately - the frontend polls and triggers /api/resolve
-    // once the bet is >1 block old, so click-to-placed is ~1 block (~2s).
-    return NextResponse.json({ hash, gameBetId });
+    let gameBetId: string | null = placed?.args?.gameBetId ?? null;
+    let resolveHash: string | null = null;
+    if (gameBetId) {
+      await waitBlocks(2);
+      resolveHash = await wallet.writeContract({
+        address: target,
+        abi: gameAbi as any,
+        functionName: 'resolve',
+        args: [gameBetId],
+      } as any);
+      await client.waitForTransactionReceipt({ hash: resolveHash as Hex });
+    }
+    return NextResponse.json({ hash, gameBetId, resolveHash });
   } catch (e: any) {
     return NextResponse.json({ error: String(e.shortMessage || e.message || e) }, { status: 500 });
   }
