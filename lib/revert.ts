@@ -13,6 +13,9 @@ const KNOWN: Record<string, string> = {
   '0x766ca6b5': 'ERC20InsufficientBalance — wager exceeds your ZSK balance',
   '0x5274afe7': 'SafeERC20FailedOperation — token transfer failed (check allowance/balance)',
   '0xd855c4f4': 'InvalidSignature — session key does not match the one authorised on-chain',
+  '0xf645eedf': 'InvalidSignature (ECDSA) — session signature could not be recovered',
+  '0xfce698f7': 'InvalidSignature — bad signature length',
+  '0xd78bce0c': 'InvalidSignature — bad signature s value',
   '0x6659116f': 'SessionNotSet — session key not authorised on-chain',
   '0x3b62ee79': 'SessionExpired — session key expired, register again',
   '0x07375c84': 'ZeroWager — wager is zero',
@@ -70,6 +73,9 @@ export function humanizeError(e: any): string {
   const raw: any = e?.cause?.data ?? e?.data ?? e?.cause?.error?.data ?? e?.error?.data ?? null;
   const decoded = decodeRevertData(raw);
   if (decoded) return decoded;
+  if (typeof raw === 'string' && raw.startsWith('0x') && raw.length >= 10) {
+    return 'execution reverted with selector ' + raw.slice(0, 10);
+  }
   // viem ExecutionRevertedError carries the raw data in cause.data as above;
   // fall back to any string reason embedded in the message.
   const msg = String(e?.shortMessage || e?.message || e || '');
