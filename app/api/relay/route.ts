@@ -112,6 +112,12 @@ export async function POST(req: Request) {
       });
     }
     let resolveHash: string | null = null;
+    let result: {
+      status: 'won' | 'lost';
+      payout: string;
+      won?: boolean;
+      details?: { roll?: number; bin?: number; multBps?: string };
+    } | null = null;
     if (gameBetId) {
       await waitBlocks(2);
       resolveHash = await wallet.writeContract({
@@ -125,18 +131,27 @@ export async function POST(req: Request) {
       const resolved = resolvedLogs.find((l) => RESOLVED_EVENTS.includes(l.eventName));
       if (resolved && placed && game) {
         const payout = (resolved.args.payout as bigint).toString();
+        const status: 'won' | 'lost' = BigInt(payout) > 0n ? 'won' : 'lost';
+        const won = resolved.eventName === 'DropResolved' ? BigInt(payout) > 0n : resolved.args.won === true;
+        const details =
+          resolved.eventName === 'RollResolved'
+            ? { roll: Number(resolved.args.roll) }
+            : resolved.eventName === 'DropResolved'
+              ? { bin: Number(resolved.args.bin), multBps: (resolved.args.multBps as bigint).toString() }
+              : undefined;
+        result = { payout, status, won, details };
         await recordBet({
           game_bet_id: gameBetId,
           game,
           player: placed.args.player as string,
           wager: (placed.args.wager as bigint).toString(),
           payout,
-          status: BigInt(payout) > 0n ? 'won' : 'lost',
+          status,
           block_number: Number(receipt.blockNumber),
         });
       }
     }
-    return NextResponse.json({ hash, gameBetId, resolveHash });
+    return NextResponse.json({ hash, gameBetId, resolveHash, result });
   } catch (e: any) {
     return NextResponse.json({ error: humanizeError(e) }, { status: 500 });
   }

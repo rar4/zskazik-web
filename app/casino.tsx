@@ -13,6 +13,7 @@ import diceAbi from '../abi/Dice.json';
 import plinkoAbi from '../abi/Plinko.json';
 import WalletButton from './wallet-button';
 import Spinner from './spinner';
+import BetAnimation, { type BetAnimationState } from './bet-animation';
 
 const T = (process.env.NEXT_PUBLIC_TOKEN || '0x79d782ffb87a643b9c5369f54f0c1fca02f40a89') as `0x${string}`;
 const TR = (process.env.NEXT_PUBLIC_TREASURY || '0xa84a9505753e0be52486e181bd9dde77d261ad56') as `0x${string}`;
@@ -74,6 +75,7 @@ export default function Casino() {
   const [rows, setRows] = useState(8);
   const [pending, setPending] = useState<string | null>(null);
   const [placing, setPlacing] = useState(false);
+  const [animation, setAnimation] = useState<BetAnimationState | null>(null);
   const [approving, setApproving] = useState(false);
   const [msg, setMsg] = useState('');
   const [bankroll, setBankroll] = useState('0');
@@ -351,6 +353,17 @@ export default function Casino() {
       setMsg('registered ✓ now click bet to play');
       return;
     }
+
+    // A real bet starts here (registration is done), so take over the
+    // screen with the game animation while the chain settles the bet.
+    setAnimation({
+      game: tab as 'flip' | 'dice' | 'plinko',
+      wager: wagerWei.toString(),
+      choiceHeads: choice,
+      target: targetNum,
+      rows,
+    });
+
     // 0-popup path: session key signs off-chain, relayer submits + resolves.
     if (address) {
       try {
@@ -388,6 +401,11 @@ export default function Casino() {
         });
         const j = await res.json();
         if (!res.ok) throw new Error(j.error || 'relay failed');
+        if (j.result) {
+          setAnimation((a) => (a ? { ...a, result: j.result } : a));
+        } else {
+          setAnimation(null);
+        }
         setMsg('settled ✓ check history');
         return;
       } catch (e: any) {
@@ -395,6 +413,7 @@ export default function Casino() {
         // direct wallet path identically — don't burn a popup on it.
         const reason = humanizeError(e);
         if (/allowance|balance|exceeds|belowmin|paused|insufficient/i.test(reason)) {
+          setAnimation(null);
           setMsg('1-click failed: ' + reason);
           setPending(null); setPlacing(false); load();
           return;
@@ -405,6 +424,7 @@ export default function Casino() {
         setPending(null); setPlacing(false); load();
       }
     }
+    let directSettled = false;
     try {
       const w = wagerWei;
       let gameId: `0x${string}`;
@@ -419,7 +439,11 @@ export default function Casino() {
         const rh = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
         const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh });
         const res = parseResolved(rrc, flipAbi, 'FlipResolved');
-        if (res) persistBet({ game_bet_id: placed.gameBetId, game: 'coinflip', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
+        if (res) {
+          persistBet({ game_bet_id: placed.gameBetId, game: 'coinflip', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
+          setAnimation((a) => (a ? { ...a, result: res } : a));
+          directSettled = true;
+        }
       } else if (tab === 'dice') {
         const h = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'roll', args: [targetNum, w], gas: GAS_PLACE } as any);
         const rc = await publicClient!.waitForTransactionReceipt({ hash: h });
@@ -431,7 +455,11 @@ export default function Casino() {
         const rh = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
         const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh });
         const res = parseResolved(rrc, diceAbi, 'RollResolved');
-        if (res) persistBet({ game_bet_id: placed.gameBetId, game: 'dice', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
+        if (res) {
+          persistBet({ game_bet_id: placed.gameBetId, game: 'dice', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
+          setAnimation((a) => (a ? { ...a, result: res } : a));
+          directSettled = true;
+        }
       } else {
         const h = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'drop', args: [rows, w], gas: GAS_PLACE } as any);
         const rc = await publicClient!.waitForTransactionReceipt({ hash: h });
@@ -443,12 +471,18 @@ export default function Casino() {
         const rh = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
         const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh });
         const res = parseResolved(rrc, plinkoAbi, 'DropResolved');
-        if (res) persistBet({ game_bet_id: placed.gameBetId, game: 'plinko', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
+        if (res) {
+          persistBet({ game_bet_id: placed.gameBetId, game: 'plinko', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
+          setAnimation((a) => (a ? { ...a, result: res } : a));
+          directSettled = true;
+        }
       }
       setMsg('settled ✓ check history');
     } catch (e: any) {
+      setAnimation(null);
       setMsg('failed: ' + (e.shortMessage || e.message));
     } finally {
+      if (!directSettled) setAnimation(null);
       setPending(null); setPlacing(false); load();
     }
   };
@@ -524,6 +558,7 @@ export default function Casino() {
           </div>
         ))}
       </div>
+      {animation && <BetAnimation animation={animation} onClose={() => setAnimation(null)} />}
     </div>
   );
 }
@@ -574,5 +609,12 @@ function parseResolved(rc: any, abi: any, resolvedEvent: string) {
   const r = parsed.find((e) => e.eventName === resolvedEvent);
   if (!r) return null;
   const payout = (r.args.payout as bigint).toString();
-  return { payout, status: BigInt(payout) > 0n ? 'won' : 'lost' };
+  const won = resolvedEvent === 'DropResolved' ? BigInt(payout) > 0n : r.args.won === true;
+  const details =
+    resolvedEvent === 'RollResolved'
+      ? { roll: Number(r.args.roll) }
+      : resolvedEvent === 'DropResolved'
+        ? { bin: Number(r.args.bin), multBps: (r.args.multBps as bigint).toString() }
+        : undefined;
+  return { payout, status: BigInt(payout) > 0n ? 'won' as const : 'lost' as const, won, details };
 }
