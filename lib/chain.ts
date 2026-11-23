@@ -31,17 +31,21 @@ export const client = createPublicClient({
   // Fallback across public Base Sepolia endpoints: single-endpoint scans
   // intermittently return partial/empty log pages (lagging or throttled
   // backends). viem's fallback transport moves to the next URL on error.
-  // Publicnode first: sepolia.base.org caps eth_getLogs at a 200-block
-  // range, which breaks 40k-block history scans. Publicnode allows wide
-  // ranges, so it leads; sepolia.base.org is a fallback only.
+  // RPC_URL (Alchemy in prod) leads: the free public endpoints return
+  // empty pages under concurrent scan load, which used to stall history.
+  // sepolia.base.org caps eth_getLogs at a 200-block range, which breaks
+  // 40k-block history scans, so it is last resort only.
   transport: fallback(
     [
-      'https://base-sepolia-rpc.publicnode.com',
       RPC_URL,
+      'https://base-sepolia-rpc.publicnode.com',
       'https://sepolia.base.org',
     ]
       .filter((u, i, a) => a.indexOf(u) === i)
-      .map((u) => http(u, { timeout: 10_000 })),
+      // 4s, not 10s: publicnode answers in ~300ms when healthy. A hung
+      // request otherwise burns 10s before the fallback even tries, and
+      // with chunk retries one bad chunk can eat the whole 60s budget.
+      .map((u) => http(u, { timeout: 4_000 })),
     { rank: false },
   ),
 });

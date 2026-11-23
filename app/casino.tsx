@@ -154,9 +154,15 @@ export default function Casino() {
   // Persisted history: cached per player in localStorage so a refresh shows
   // the full history instantly, then the chain scan refreshes it in place.
   const cacheKey = address ? `zskazik-bets-${address.toLowerCase()}` : null;
+  const loadRef = useRef(false);
   const load = async () => {
+    // In-flight guard: the 6s interval must not stack polls on top of a
+    // slow one — stacked fetches saturate the browser's connection limit
+    // and the history spinner never settles ("loads infinitely").
+    if (loadRef.current) return;
+    loadRef.current = true;
     const pc = publicClientRef.current;
-    if (!pc || !address) return;
+    if (!pc || !address) { loadRef.current = false; return; }
     // Live ZSK balance: refetch on every poll (6s) and after every bet
     // (load() runs in play()'s finally), so the header updates immediately
     // when a wager is deducted or a payout lands.
@@ -170,8 +176,16 @@ export default function Casino() {
       }
     } catch {}
     try {
-      const r = await fetch(`/api/bets?player=${address}&limit=20`);
-      const data = await r.json().catch(() => null);
+      // Hard timeout: a hung request must never leave the spinner up.
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 25_000);
+      let data: any = null;
+      try {
+        const r = await fetch(`/api/bets?player=${address}&limit=20`, { signal: ctrl.signal });
+        data = await r.json().catch(() => null);
+      } finally {
+        clearTimeout(timer);
+      }
       // Only replace state when the data actually changed - replacing the
       // array every 6s re-renders every row and makes history flicker.
       // On fetch failure keep the old list (never flash "no bets yet").
@@ -181,9 +195,11 @@ export default function Casino() {
         // Persist to localStorage so history survives refresh.
         try { if (cacheKey) localStorage.setItem(cacheKey, JSON.stringify(data)); } catch {}
       }
-      setBetsLoaded(true);
     } catch {
+      // Timed out / failed: keep whatever list we have, stop spinning.
+    } finally {
       setBetsLoaded(true);
+      loadRef.current = false;
     }
   };
   useEffect(() => {
