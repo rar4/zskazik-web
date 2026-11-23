@@ -34,7 +34,7 @@ const GAS_PLACE = 1_500_000n;
 const GAS_RESOLVE = 800_000n;
 
 type Tab = 'flip' | 'dice' | 'plinko' | 'history';
-type Bet = { game_bet_id: string; game: string; player: string; wager: string; payout?: string; status: string };
+type Bet = { game_bet_id: string; game: string; player: string; wager: string; payout?: string; status: string; block_number: number };
 
 const S = {
   page: { maxWidth: 860, margin: '0 auto', padding: 20 },
@@ -313,25 +313,40 @@ export default function Casino() {
       let gameId: `0x${string}`;
       if (tab === 'flip') {
         const h = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'flip', args: [choice, w], gas: GAS_PLACE } as any);
-        gameId = parseGameId(await publicClient!.waitForTransactionReceipt({ hash: h }), flipAbi, 'FlipPlaced');
+        const rc = await publicClient!.waitForTransactionReceipt({ hash: h });
+        const placed = parsePlaced(rc, flipAbi, 'FlipPlaced');
+        gameId = placed.gameBetId;
+        persistBet({ game_bet_id: placed.gameBetId, game: 'coinflip', player: placed.player, wager: placed.wager, status: 'escrowed', block_number: placed.blockNumber });
         setPending(gameId); setMsg('flipped — resolving…');
         await waitBlocks(2);
         const rh = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
-        await publicClient!.waitForTransactionReceipt({ hash: rh });
+        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh });
+        const res = parseResolved(rrc, flipAbi, 'FlipResolved');
+        if (res) persistBet({ game_bet_id: placed.gameBetId, game: 'coinflip', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
       } else if (tab === 'dice') {
         const h = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'roll', args: [target, w], gas: GAS_PLACE } as any);
-        gameId = parseGameId(await publicClient!.waitForTransactionReceipt({ hash: h }), diceAbi, 'RollPlaced');
+        const rc = await publicClient!.waitForTransactionReceipt({ hash: h });
+        const placed = parsePlaced(rc, diceAbi, 'RollPlaced');
+        gameId = placed.gameBetId;
+        persistBet({ game_bet_id: placed.gameBetId, game: 'dice', player: placed.player, wager: placed.wager, status: 'escrowed', block_number: placed.blockNumber });
         setPending(gameId); setMsg('rolled — resolving…');
         await waitBlocks(2);
         const rh = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
-        await publicClient!.waitForTransactionReceipt({ hash: rh });
+        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh });
+        const res = parseResolved(rrc, diceAbi, 'RollResolved');
+        if (res) persistBet({ game_bet_id: placed.gameBetId, game: 'dice', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
       } else {
         const h = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'drop', args: [rows, w], gas: GAS_PLACE } as any);
-        gameId = parseGameId(await publicClient!.waitForTransactionReceipt({ hash: h }), plinkoAbi, 'DropPlaced');
+        const rc = await publicClient!.waitForTransactionReceipt({ hash: h });
+        const placed = parsePlaced(rc, plinkoAbi, 'DropPlaced');
+        gameId = placed.gameBetId;
+        persistBet({ game_bet_id: placed.gameBetId, game: 'plinko', player: placed.player, wager: placed.wager, status: 'escrowed', block_number: placed.blockNumber });
         setPending(gameId); setMsg('dropped — resolving…');
         await waitBlocks(2);
         const rh = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
-        await publicClient!.waitForTransactionReceipt({ hash: rh });
+        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh });
+        const res = parseResolved(rrc, plinkoAbi, 'DropResolved');
+        if (res) persistBet({ game_bet_id: placed.gameBetId, game: 'plinko', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
       }
       setMsg('settled ✓ check history');
     } catch (e: any) {
@@ -348,7 +363,10 @@ export default function Casino() {
     setResolvingId(b.game_bet_id);
     try {
       const h = await wallet.writeContract({ address: addr, abi, functionName: 'resolve', args: [b.game_bet_id], gas: GAS_RESOLVE } as any);
-      await publicClient!.waitForTransactionReceipt({ hash: h });
+      const rc = await publicClient!.waitForTransactionReceipt({ hash: h });
+      const resName = b.game === 'coinflip' ? 'FlipResolved' : b.game === 'dice' ? 'RollResolved' : 'DropResolved';
+      const res = parseResolved(rc, abi, resName);
+      if (res && address && b.block_number) persistBet({ game_bet_id: b.game_bet_id, game: b.game, player: address, wager: b.wager, payout: res.payout, status: res.status, block_number: b.block_number });
       setMsg('settled ✓ check history');
       load();
     } catch (e: any) {
@@ -455,7 +473,17 @@ function safeParseEther(v: string): bigint | null {
   }
 }
 
-function parseGameId(rc: any, abi: any, placedEvent: string): `0x${string}` {
+// Write-through to the persistent bet log. Fire-and-forget: the bet is
+// already on-chain; /api/bets verifies it against the chain before storing.
+function persistBet(bet: Bet) {
+  fetch('/api/bets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(bet),
+  }).catch(() => {});
+}
+
+function parsePlaced(rc: any, abi: any, placedEvent: string) {
   // The place tx emits THREE logs with a bytes32/address in topic1, in order:
   // ERC20 Transfer (escrow pull), Treasury BetEscrowed (treasuryBetId), then
   // the game's *Placed event (gameBetId). Picking "the first log with a
@@ -464,6 +492,19 @@ function parseGameId(rc: any, abi: any, placedEvent: string): `0x${string}` {
   // in escrow. Decode by event name instead so only *Placed matches.
   const parsed = parseEventLogs({ abi, logs: rc.logs }) as any[];
   const placed = parsed.find((e) => e.eventName === placedEvent);
-  if (placed) return placed.args.gameBetId as `0x${string}`;
-  throw new Error(placedEvent + ' not found in receipt');
+  if (!placed) throw new Error(placedEvent + ' not found in receipt');
+  return {
+    gameBetId: placed.args.gameBetId as `0x${string}`,
+    player: placed.args.player as string,
+    wager: (placed.args.wager as bigint).toString(),
+    blockNumber: Number(rc.blockNumber),
+  };
+}
+
+function parseResolved(rc: any, abi: any, resolvedEvent: string) {
+  const parsed = parseEventLogs({ abi, logs: rc.logs }) as any[];
+  const r = parsed.find((e) => e.eventName === resolvedEvent);
+  if (!r) return null;
+  const payout = (r.args.payout as bigint).toString();
+  return { payout, status: BigInt(payout) > 0n ? 'won' : 'lost' };
 }

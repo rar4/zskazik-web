@@ -92,7 +92,7 @@ export async function loadAllBets(player?: string, game?: string): Promise<Bet[]
     const plinkoAddrs = [ADDR.plinko, ADDR_OLD.plinko].filter((a) => !isZeroAddr(a));
     for (const a of plinkoAddrs) out.push(...await loadGame(a, EV.dropPlaced, EV.dropResolved, 'plinko', player));
   }
-  out.sort((a, b) => b.block_number - a.block_number);
+  out.sort((a, b) => b.block_number - a.block_number || b.game_bet_id.localeCompare(a.game_bet_id));
   // Dedupe by gameBetId (paranoia: same bet must never appear twice).
   const seen = new Set<string>();
   return out.filter((b) => {

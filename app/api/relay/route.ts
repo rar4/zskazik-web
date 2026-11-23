@@ -3,6 +3,7 @@ import { createWalletClient, http, parseAbi, parseEventLogs, type Hex } from 'vi
 import { privateKeyToAccount } from 'viem/accounts';
 import { baseSepolia } from 'viem/chains';
 import { ADDR, client } from '@/lib/chain';
+import { recordBet } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,7 +22,17 @@ const gameAbi = parseAbi([
   'event FlipPlaced(bytes32 indexed gameBetId, address indexed player, uint256 wager, bool choiceHeads)',
   'event RollPlaced(bytes32 indexed gameBetId, address indexed player, uint256 wager, uint8 target)',
   'event DropPlaced(bytes32 indexed gameBetId, address indexed player, uint256 wager, uint8 rows)',
+  'event FlipResolved(bytes32 indexed gameBetId, address indexed player, bool won, uint256 payout)',
+  'event RollResolved(bytes32 indexed gameBetId, address indexed player, uint8 roll, bool won, uint256 payout)',
+  'event DropResolved(bytes32 indexed gameBetId, address indexed player, uint8 bin, uint256 multBps, uint256 payout)',
 ]);
+
+const RESOLVED_EVENTS = ['FlipResolved', 'RollResolved', 'DropResolved'];
+const GAME_BY_ADDR: Record<string, string> = {
+  [ADDR.coinflip.toLowerCase()]: 'coinflip',
+  [ADDR.dice.toLowerCase()]: 'dice',
+  [ADDR.plinko.toLowerCase()]: 'plinko',
+};
 
 // Fast RPC for the relayer: publicnode allows wide getLogs ranges and is
 // low-latency; sepolia.base.org caps getLogs at 200 blocks.
@@ -65,6 +76,19 @@ export async function POST(req: Request) {
     const logs = parseEventLogs({ abi: gameAbi, logs: receipt.logs }) as any[];
     const placed = logs.find((l) => ['FlipPlaced', 'RollPlaced', 'DropPlaced'].includes(l.eventName));
     let gameBetId: string | null = placed?.args?.gameBetId ?? null;
+    const game = GAME_BY_ADDR[String(target).toLowerCase()];
+    // Write-through: record the bet in the persistent log at placement
+    // time (recordBet never throws, so a DB outage can't fail the bet).
+    if (placed && game) {
+      await recordBet({
+        game_bet_id: placed.args.gameBetId as string,
+        game,
+        player: placed.args.player as string,
+        wager: (placed.args.wager as bigint).toString(),
+        status: 'escrowed',
+        block_number: Number(receipt.blockNumber),
+      });
+    }
     let resolveHash: string | null = null;
     if (gameBetId) {
       await waitBlocks(2);
@@ -74,7 +98,21 @@ export async function POST(req: Request) {
         functionName: 'resolve',
         args: [gameBetId],
       } as any);
-      await client.waitForTransactionReceipt({ hash: resolveHash as Hex });
+      const resolveReceipt = await client.waitForTransactionReceipt({ hash: resolveHash as Hex });
+      const resolvedLogs = parseEventLogs({ abi: gameAbi, logs: resolveReceipt.logs }) as any[];
+      const resolved = resolvedLogs.find((l) => RESOLVED_EVENTS.includes(l.eventName));
+      if (resolved && placed && game) {
+        const payout = (resolved.args.payout as bigint).toString();
+        await recordBet({
+          game_bet_id: gameBetId,
+          game,
+          player: placed.args.player as string,
+          wager: (placed.args.wager as bigint).toString(),
+          payout,
+          status: BigInt(payout) > 0n ? 'won' : 'lost',
+          block_number: Number(receipt.blockNumber),
+        });
+      }
     }
     return NextResponse.json({ hash, gameBetId, resolveHash });
   } catch (e: any) {
