@@ -70,11 +70,10 @@ export default function Casino() {
   const [tab, setTab] = useState<Tab>('flip');
   const [wager, setWager] = useState('100');
   const [choice, setChoice] = useState(true);
-  const [target, setTarget] = useState(50);
+  const [target, setTarget] = useState('50');
   const [rows, setRows] = useState(8);
   const [pending, setPending] = useState<string | null>(null);
   const [placing, setPlacing] = useState(false);
-  const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [approving, setApproving] = useState(false);
   const [msg, setMsg] = useState('');
   const [bankroll, setBankroll] = useState('0');
@@ -114,6 +113,12 @@ export default function Casino() {
   });
   const insufficientBalance = wagerValid && balanceData !== undefined && (balanceData as bigint) < wagerWei!;
   const needApprove = wagerValid && BigInt(allowance || '0') < wagerWei!;
+
+  // Dice roll-over target (5-95). Kept as text so the field can be emptied
+  // and edited; leading zeros are stripped on input ("05" -> "5",
+  // "050" -> "50") so they never render. targetNum is the parsed value
+  // used for the bet and the payout line.
+  const targetNum = target === '' || !Number.isFinite(Number(target)) ? 50 : Number(target);
 
   // Session-key (0-popup) betting: is a session authorised on-chain?
   const { data: sessionActiveData, refetch: refetchSession } = useReadContract({
@@ -354,7 +359,7 @@ export default function Casino() {
         const targetAddr = tab === 'flip' ? FL : tab === 'dice' ? DI : PL;
         const abi = tab === 'flip' ? flipAbi : tab === 'dice' ? diceAbi : plinkoAbi;
         const fn = tab === 'flip' ? 'flip' : tab === 'dice' ? 'roll' : 'drop';
-        const args = tab === 'flip' ? [choice, wagerWei] : tab === 'dice' ? [target, wagerWei] : [rows, wagerWei];
+        const args = tab === 'flip' ? [choice, wagerWei] : tab === 'dice' ? [targetNum, wagerWei] : [rows, wagerWei];
         const callData = encodeFunctionData({ abi: abi as any, functionName: fn, args: args as any });
         // Simulate the bet as the user before signing: catches multiplier /
         // limits / allowance reverts with the real reason, instead of
@@ -416,7 +421,7 @@ export default function Casino() {
         const res = parseResolved(rrc, flipAbi, 'FlipResolved');
         if (res) persistBet({ game_bet_id: placed.gameBetId, game: 'coinflip', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
       } else if (tab === 'dice') {
-        const h = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'roll', args: [target, w], gas: GAS_PLACE } as any);
+        const h = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'roll', args: [targetNum, w], gas: GAS_PLACE } as any);
         const rc = await publicClient!.waitForTransactionReceipt({ hash: h });
         const placed = parsePlaced(rc, diceAbi, 'RollPlaced');
         gameId = placed.gameBetId;
@@ -445,26 +450,6 @@ export default function Casino() {
       setMsg('failed: ' + (e.shortMessage || e.message));
     } finally {
       setPending(null); setPlacing(false); load();
-    }
-  };
-
-  const resolveStuck = async (b: Bet) => {
-    if (!wallet || resolvingId) return;
-    const addr = b.game === 'coinflip' ? FL : b.game === 'dice' ? DI : PL;
-    const abi = b.game === 'coinflip' ? flipAbi : b.game === 'dice' ? diceAbi : plinkoAbi;
-    setResolvingId(b.game_bet_id);
-    try {
-      const h = await wallet.writeContract({ address: addr, abi, functionName: 'resolve', args: [b.game_bet_id], gas: GAS_RESOLVE } as any);
-      const rc = await publicClient!.waitForTransactionReceipt({ hash: h });
-      const resName = b.game === 'coinflip' ? 'FlipResolved' : b.game === 'dice' ? 'RollResolved' : 'DropResolved';
-      const res = parseResolved(rc, abi, resName);
-      if (res && address && b.block_number) persistBet({ game_bet_id: b.game_bet_id, game: b.game, player: address, wager: b.wager, payout: res.payout, status: res.status, block_number: b.block_number });
-      setMsg('settled ✓ check history');
-      load();
-    } catch (e: any) {
-      setMsg('resolve failed: ' + (e.shortMessage || e.message));
-    } finally {
-      setResolvingId(null);
     }
   };
 
@@ -503,7 +488,7 @@ export default function Casino() {
               <button style={S.tab(choice)} onClick={() => setChoice(!choice)}>{choice ? 'heads' : 'tails'}</button>
             )}
             {tab === 'dice' && (
-              <input style={S.input} type="number" min={5} max={95} value={target} onChange={(e) => setTarget(Number(e.target.value))} title="roll-over target" />
+              <input style={S.input} type="number" min={5} max={95} value={target} onChange={(e) => setTarget(e.target.value.replace(/^0+(?=\d)/, ''))} title="roll-over target" />
             )}
             {tab === 'plinko' && (
               <select value={rows} onChange={(e) => setRows(Number(e.target.value))} style={S.input as any}>
@@ -511,7 +496,7 @@ export default function Casino() {
               </select>
             )}
           </div>
-          {tab === 'dice' && <div style={S.muted}>target {target} → pays {(98 / (100 - target)).toFixed(2)}x on roll ≥ {target} (2% edge)</div>}
+          {tab === 'dice' && <div style={S.muted}>target {targetNum} → pays {(98 / (100 - targetNum)).toFixed(2)}x on roll ≥ {targetNum} (2% edge)</div>}
           {tab === 'flip' && <div style={S.muted}>pays 1.96x (2% edge)</div>}
           {tab === 'plinko' && <div style={S.muted}>pays by bin table, up to 16x on 16 rows</div>}
           <div style={S.row}>
@@ -530,21 +515,12 @@ export default function Casino() {
       <div style={S.card}>
         <b>recent bets</b>
         {!betsLoaded && <div style={S.muted}><Spinner size={11} /> loading history…</div>}
-        {betsLoaded && (Array.isArray(bets) ? bets : []).length === 0 && <div style={S.muted}>no bets yet</div>}
-        {(Array.isArray(bets) ? bets : []).map((b) => (
-          <div key={b.game_bet_id} style={{ ...S.muted, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        {betsLoaded && (Array.isArray(bets) ? bets : []).filter((b) => b.status !== 'escrowed').length === 0 && <div style={S.muted}>no bets yet</div>}
+        {(Array.isArray(bets) ? bets : []).filter((b) => b.status !== 'escrowed').map((b) => (
+          <div key={b.game_bet_id} style={S.muted}>
             <span>
               {b.game} · {fmt(b.wager)} → {b.payout ? fmt(b.payout) : '…'} · {b.status}
             </span>
-            {b.status === 'escrowed' && isConnected && !wrongChain && (
-              <button
-                style={{ ...S.btn, padding: '4px 10px', fontSize: 12, opacity: resolvingId === b.game_bet_id ? 0.7 : 1 }}
-                disabled={resolvingId !== null || pending !== null}
-                onClick={() => resolveStuck(b)}
-              >
-                {resolvingId === b.game_bet_id ? <><Spinner size={11} />resolving…</> : 'resolve'}
-              </button>
-            )}
           </div>
         ))}
       </div>
