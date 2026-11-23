@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
-import { createWalletClient, http, parseAbi, parseEventLogs, type Hex } from 'viem';
+import { createWalletClient, http, parseAbi, parseEventLogs, encodeFunctionData, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { baseSepolia } from 'viem/chains';
 import { ADDR, client } from '@/lib/chain';
 import { recordBet } from '@/lib/store';
+import { humanizeError } from '@/lib/revert';
 
 export const dynamic = 'force-dynamic';
 
@@ -63,6 +64,27 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'target not a game contract' }, { status: 400 });
     }
     const wallet = relayer();
+    // Preflight: simulate the meta-tx before paying gas for it. Without
+    // this, a doomed bet (e.g. allowance < wager) reverts on-chain and the
+    // user only sees the forwarder's wrapper selector 0x7e256957.
+    const active = await client.readContract({
+      address: ADDR.forwarder, abi: forwarderAbi, functionName: 'isSessionActive', args: [user],
+    } as any).catch(() => false);
+    if (!active) {
+      return NextResponse.json({ error: 'SessionNotSet/SessionExpired — register the session key first' }, { status: 400 });
+    }
+    try {
+      const simData = encodeFunctionData({
+        abi: forwarderAbi, functionName: 'executeMetaTransaction', args: [user, target, callData, signature],
+      } as any);
+      // Raw eth_call: client.call drops revert data in CallExecutionError.
+      await (client as any).request({
+        method: 'eth_call',
+        params: [{ from: wallet.account.address, to: ADDR.forwarder, data: simData }, 'latest'],
+      });
+    } catch (simErr: any) {
+      return NextResponse.json({ error: humanizeError(simErr), code: 'PREFLIGHT_REVERT' }, { status: 400 });
+    }
     const hash = await wallet.writeContract({
       address: ADDR.forwarder,
       abi: forwarderAbi as any,
@@ -116,6 +138,6 @@ export async function POST(req: Request) {
     }
     return NextResponse.json({ hash, gameBetId, resolveHash });
   } catch (e: any) {
-    return NextResponse.json({ error: String(e.shortMessage || e.message || e) }, { status: 500 });
+    return NextResponse.json({ error: humanizeError(e) }, { status: 500 });
   }
 }

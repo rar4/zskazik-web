@@ -5,6 +5,7 @@ import { useAccount, usePublicClient, useReadContract, useSwitchChain, useWallet
 import { parseEther, formatEther, parseEventLogs, encodeFunctionData } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { getSessionAccount, metaDigest, forwarderAbi, SESSION_DAYS } from '../lib/session';
+import { humanizeError } from '../lib/revert';
 import tokenAbi from '../abi/CasinoToken.json';
 import treasuryAbi from '../abi/Treasury.json';
 import flipAbi from '../abi/CoinFlip.json';
@@ -91,7 +92,11 @@ export default function Casino() {
     abi: tokenAbi as any,
     functionName: 'allowance',
     args: address ? ([address, TR] as any) : undefined,
-    query: { enabled: !!address && !!T },
+    // Refetch like the balance: without this the cached allowance stays at
+    // its pre-bet value forever, so after earlier bets consume it the UI
+    // still thinks a bigger wager is approved and sends a doomed meta-tx
+    // (inner ERC20InsufficientAllowance, wrapped as 0x7e256957).
+    query: { enabled: !!address && !!T, refetchInterval: 6000 },
   });
   const allowance = allowanceData?.toString() ?? '0';
 
@@ -127,6 +132,17 @@ export default function Casino() {
     if (!wallet || settingUp) return false;
     const session = getSessionAccount();
     if (!session) return false;
+    // Already authorised with THIS local key? Skip the popup entirely.
+    // (Previously every register click re-sent setSigner.)
+    try {
+      const [signer] = (await publicClient!.readContract({
+        address: FW, abi: forwarderAbi, functionName: 'sessionOf', args: [address!],
+      } as any)) as [string, bigint];
+      const active = await publicClient!.readContract({
+        address: FW, abi: forwarderAbi, functionName: 'isSessionActive', args: [address!],
+      } as any);
+      if (active && signer.toLowerCase() === session.address.toLowerCase()) return true;
+    } catch {}
     setSettingUp(true);
     try {
       const expiry = BigInt(Math.floor(Date.now() / 1000) + SESSION_DAYS * 24 * 3600);
@@ -167,6 +183,8 @@ export default function Casino() {
     // (load() runs in play()'s finally), so the header updates immediately
     // when a wager is deducted or a payout lands.
     refetchBalance();
+    refetchAllowance();
+    refetchSession();
     try {
       const r = await fetch(`/api/bankroll`);
       const j = await r.json();
@@ -231,7 +249,15 @@ export default function Casino() {
       setMsg('config error: contract addresses missing');
       return false;
     }
-    const amount = balanceData && (balanceData as bigint) > wagerWei! ? (balanceData as bigint) : wagerWei!;
+    // Fresh balance (not the possibly stale cached one) so the approval
+    // covers this wager even if the balance refetch hasn't landed yet.
+    let freshBal: bigint = wagerWei!;
+    try {
+      freshBal = (await publicClient!.readContract({
+        address: T, abi: tokenAbi, functionName: 'balanceOf', args: [address!],
+      } as any)) as bigint;
+    } catch {}
+    const amount = freshBal > wagerWei! ? freshBal : wagerWei!;
     setApproving(true);
     try {
       setMsg('approving treasury for 1-click betting… confirm in your wallet (one-time)');
@@ -240,12 +266,16 @@ export default function Casino() {
         args: [TR, amount], gas: GAS_APPROVE,
       } as any);
       await publicClient!.waitForTransactionReceipt({ hash });
+      // Verify the approval actually landed before claiming success —
+      // previously this returned true unconditionally after 5 retries, so
+      // the next click could send a bet the allowance didn't cover.
       for (let i = 0; i < 5; i++) {
         const r = await refetchAllowance();
-        if (r.data && (r.data as bigint) >= wagerWei!) break;
+        if (r.data && (r.data as bigint) >= wagerWei!) return true;
         await new Promise((res) => setTimeout(res, 2000));
       }
-      return true;
+      setMsg('approve mined but allowance still below the wager — click register again');
+      return false;
     } catch (e: any) {
       setMsg('approve failed: ' + (e.shortMessage || e.message));
       return false;
@@ -282,11 +312,35 @@ export default function Casino() {
     }
     setMsg('');
     setPlacing(true);
+    // Fresh preflight (never trust the cached react-query values): read
+    // allowance / balance / session straight from the chain. A stale
+    // cached allowance is what sent a 3200 ZSK bet with only 998 approved
+    // to the forwarder, where the inner escrow reverted and surfaced as
+    // the opaque MetaTransactionFailed selector 0x7e256957.
+    let freshAllowance = BigInt(allowance || '0');
+    let freshBalance: bigint | null = null;
+    let freshSession = sessionActive;
+    try {
+      const [allow, bal, sess] = await Promise.all([
+        publicClient!.readContract({ address: T, abi: tokenAbi, functionName: 'allowance', args: [address!, TR] } as any),
+        publicClient!.readContract({ address: T, abi: tokenAbi, functionName: 'balanceOf', args: [address!] } as any),
+        publicClient!.readContract({ address: FW, abi: forwarderAbi, functionName: 'isSessionActive', args: [address!] } as any),
+      ]);
+      freshAllowance = allow as bigint;
+      freshBalance = bal as bigint;
+      freshSession = sess === true;
+    } catch {}
+    if (freshBalance !== null && freshBalance < wagerWei) {
+      setPlacing(false);
+      setMsg('insufficient ZSK balance for this wager');
+      return;
+    }
+    const freshNeedApprove = freshAllowance < wagerWei;
     // Registration first: this click only registers (approve + session
     // authorisation, 2 popups) and does NOT bet. Bets are placed only
     // after registration, by the next click.
-    if (needApprove || !sessionActive) {
-      if (needApprove && !(await ensureApproved())) { setPlacing(false); return; }
+    if (freshNeedApprove || !freshSession) {
+      if (freshNeedApprove && !(await ensureApproved())) { setPlacing(false); return; }
       if (!(await ensureSession())) { setPlacing(false); return; }
       setPlacing(false);
       setMsg('registered ✓ now click bet to play');
@@ -302,6 +356,20 @@ export default function Casino() {
         const fn = tab === 'flip' ? 'flip' : tab === 'dice' ? 'roll' : 'drop';
         const args = tab === 'flip' ? [choice, wagerWei] : tab === 'dice' ? [target, wagerWei] : [rows, wagerWei];
         const callData = encodeFunctionData({ abi: abi as any, functionName: fn, args: args as any });
+        // Simulate the bet as the user before signing: catches multiplier /
+        // limits / allowance reverts with the real reason, instead of
+        // submitting a doomed meta-tx that only shows selector 0x7e256957.
+        // Raw eth_call (not client.call): viem's CallExecutionError drops
+        // the revert data, while the RPC error carries it in `data` —
+        // that's the only way to name the actual cause.
+        try {
+          await (publicClient as any).request({
+            method: 'eth_call',
+            params: [{ from: address, to: targetAddr, data: callData }, 'latest'],
+          });
+        } catch (simErr: any) {
+          throw new Error(humanizeError(simErr));
+        }
         const nonce = (await publicClient!.readContract({
           address: FW, abi: forwarderAbi, functionName: 'nonces', args: [address],
         } as any)) as bigint;
@@ -318,8 +386,16 @@ export default function Casino() {
         setMsg('settled ✓ check history');
         return;
       } catch (e: any) {
-        // Fall through to the direct wallet path below on any relay failure.
-        setMsg('1-click failed (' + (e.shortMessage || e.message) + ') — falling back to wallet…');
+        // Deterministic failures (allowance, limits, multiplier) fail the
+        // direct wallet path identically — don't burn a popup on it.
+        const reason = humanizeError(e);
+        if (/allowance|balance|exceeds|belowmin|paused|insufficient/i.test(reason)) {
+          setMsg('1-click failed: ' + reason);
+          setPending(null); setPlacing(false); load();
+          return;
+        }
+        // Fall through to the direct wallet path below on transient relay failure.
+        setMsg('1-click failed (' + reason + ') — falling back to wallet…');
       } finally {
         setPending(null); setPlacing(false); load();
       }
