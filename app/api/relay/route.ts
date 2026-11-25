@@ -3,6 +3,7 @@ import { createWalletClient, http, parseAbi, parseEventLogs, encodeFunctionData,
 import { privateKeyToAccount } from 'viem/accounts';
 import { baseSepolia } from 'viem/chains';
 import { ADDR, client } from '@/lib/chain';
+import { derivePlinkoPath } from '@/lib/plinko-path';
 import { recordBet } from '@/lib/store';
 import { humanizeError } from '@/lib/revert';
 
@@ -116,7 +117,7 @@ export async function POST(req: Request) {
       status: 'won' | 'lost';
       payout: string;
       won?: boolean;
-      details?: { roll?: number; bin?: number; multBps?: string };
+      details?: { roll?: number; bin?: number; multBps?: string; path?: number[]; word?: string };
     } | null = null;
     if (gameBetId) {
       await waitBlocks(2);
@@ -133,13 +134,36 @@ export async function POST(req: Request) {
         const payout = (resolved.args.payout as bigint).toString();
         const status: 'won' | 'lost' = BigInt(payout) > 0n ? 'won' : 'lost';
         const won = resolved.eventName === 'DropResolved' ? BigInt(payout) > 0n : resolved.args.won === true;
-        const details =
+        const details: { roll?: number; bin?: number; multBps?: string; path?: number[]; word?: string } | undefined =
           resolved.eventName === 'RollResolved'
             ? { roll: Number(resolved.args.roll) }
             : resolved.eventName === 'DropResolved'
               ? { bin: Number(resolved.args.bin), multBps: (resolved.args.multBps as bigint).toString() }
               : undefined;
         result = { payout, status, won, details };
+        // Plinko bit-path replay: recompute the contract's randomness word
+        // from the resolve block's prevrandao so the animator can replay the
+        // exact bounces. Only attach it when it reproduces the settled bin —
+        // a mismatch means our replica drifted, and the UI must not animate
+        // a path that disagrees with the payout.
+        if (resolved.eventName === 'DropResolved' && details?.bin !== undefined) {
+          try {
+            const path = await derivePlinkoPath(
+              client as any,
+              String(target),
+              gameBetId as Hex,
+              Number(receipt.blockNumber),
+              Number(resolveReceipt.blockNumber),
+              Number(placed.args.rows),
+            );
+            if (path.bin === details.bin) {
+              details.path = path.bits;
+              details.word = path.word;
+            }
+          } catch {
+            // Path is cosmetic; the settled result above stands on its own.
+          }
+        }
         await recordBet({
           game_bet_id: gameBetId,
           game,

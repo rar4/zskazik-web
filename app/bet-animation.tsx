@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { formatEther } from 'viem';
+import { multLabel, pathPositions } from '../lib/plinko-path';
 
 export type BetAnimationState = {
   game: 'flip' | 'dice' | 'plinko';
@@ -17,6 +18,9 @@ export type BetAnimationState = {
       roll?: number;
       bin?: number;
       multBps?: string;
+      /** On-chain Plinko path: bits[i]=1 => right at row i (see lib/plinko-path). */
+      path?: number[];
+      word?: string;
     };
   } | null;
 };
@@ -272,103 +276,206 @@ function DiceAnimation({ animation, result, tick }: { animation: BetAnimationSta
 }
 
 function PlinkoAnimation({ animation, result }: { animation: BetAnimationState; result: NonNullable<BetAnimationState['result']> | null }) {
-  const rows = clamp(animation.rows, 1, 16);
+  const rows = clamp(animation.rows, 8, 16);
   const bins = rows + 1;
-  const [step, setStep] = useState(0);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const doneRef = useRef(false);
+  const [done, setDone] = useState(false);
   const resultBin = result?.details?.bin;
-  const cycle = Math.floor(step / (rows + 2));
-  const runningBin = (11 + cycle * 37) % bins;
-  const finalBin = resultBin ?? runningBin;
-  const known = resultBin !== undefined;
+  const path = result?.details?.path;
+  // The path is only trustworthy if it reproduces the settled bin. If the
+  // relayer/direct path failed to derive it, we show the settled bin without
+  // animating a made-up trajectory.
+  const pathValid = Array.isArray(path) && path.length === rows && resultBin !== undefined && path.reduce((a, b) => a + (b ? 1 : 0), 0) === resultBin;
 
+  useEffect(() => { doneRef.current = false; setDone(false); }, [resultBin, path]);
+
+  // Canvas board: ball replays the on-chain bits (bit i = right at row i).
+  // Peg positions are in spacing units: at step s the ball has `rights`
+  // rights among the first s bits, x-offset = rights - s/2, which is exactly
+  // peg (s, rights). Motion between pegs is cosmetic only (easing, squash,
+  // trail) — it cannot change the bin.
   useEffect(() => {
-    setStep(0);
-  }, [resultBin]);
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const W = 560;
+    const rowGap = Math.min(26, Math.floor(340 / rows));
+    const H = 46 + rows * rowGap + 30;
+    const dpr = Math.min(2, typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width = `${W}px`;
+    canvas.style.maxWidth = '100%';
+    canvas.style.height = `${H}px`;
+    ctx.scale(dpr, dpr);
+    const spacing = (W - 40) / rows;
+    const pegXY = (row: number, col: number) => ({ x: W / 2 + (col - row / 2) * spacing, y: 30 + row * rowGap });
+    const ballXY = (step: number, rights: number) => ({ x: W / 2 + (rights - step / 2) * spacing, y: 30 + step * rowGap });
 
-  useEffect(() => {
-    const i = setInterval(() => {
-      setStep((s) => {
-        if (known) return Math.min(rows, s + 1);
-        return s >= rows + 1 ? 0 : s + 1;
-      });
-    }, 170);
-    return () => clearInterval(i);
-  }, [known, rows]);
+    // Segment timeline: fall between pegs, accelerating slightly, then a
+    // settle into the bin. Slow-mo the last two segments on high bins.
+    const positions = pathValid && path ? pathPositions(path) : null;
+    const segDur: number[] = [];
+    if (positions) {
+      const mult = result?.details?.multBps ? Number(result.details.multBps) : 0;
+      const slow = mult >= 20000 ? 1.6 : 1;
+      for (let i = 0; i < rows; i++) {
+        let d = 165 - i * 4;
+        if (i >= rows - 2) d *= slow;
+        segDur.push(Math.max(70, d));
+      }
+      segDur.push(420); // settle into bin
+    }
+    const total = segDur.reduce((a, b) => a + b, 0);
+    let raf = 0;
+    let start = 0;
+    let lastHit = -1;
+    let audio: AudioContext | null = null;
+    const trail: { x: number; y: number }[] = [];
+    const tick = () => {
+      try {
+        audio = audio ?? new (window.AudioContext || (window as any).webkitAudioContext)();
+        if (audio.state === 'suspended') void audio.resume();
+        const o = audio.createOscillator();
+        const g = audio.createGain();
+        o.frequency.value = 1900;
+        g.gain.setValueAtTime(0.05, audio.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.06);
+        o.connect(g).connect(audio.destination);
+        o.start();
+        o.stop(audio.currentTime + 0.07);
+      } catch { /* sound is cosmetic */ }
+    };
+    const draw = (now: number) => {
+      if (!start) start = now;
+      const t = now - start;
+      // Locate segment + local progress.
+      let seg = 0;
+      let acc = 0;
+      while (seg < segDur.length && t > acc + segDur[seg]) { acc += segDur[seg]; seg += 1; }
+      const p = segDur.length ? Math.min(1, Math.max(0, (t - acc) / (segDur[seg] ?? 1))) : 1;
+      const finished = !!positions && (seg >= segDur.length || t >= total);
+      const curStep = positions ? Math.min(rows, seg) : 0;
+      const curRights = positions ? positions[curStep] : 0;
+      let bx: number, by: number;
+      if (!positions) {
+        // Idle: ball hovers at the top until the on-chain path arrives.
+        bx = W / 2;
+        by = 16 + Math.sin(now / 320) * 4;
+      } else if (finished) {
+        const end = ballXY(rows, positions[rows]);
+        bx = end.x; by = end.y + 16;
+      } else if (seg >= rows) {
+        // Settle segment: drop straight into the bin slot.
+        const end = ballXY(rows, positions[rows]);
+        bx = end.x;
+        by = end.y + p * 16;
+      } else {
+        const a = ballXY(curStep, curRights);
+        const b = ballXY(curStep + 1, positions[curStep + 1]);
+        const e = p * p * (3 - 2 * p); // smootherstep-ish
+        // Quadratic arc sagging slightly below the straight diagonal.
+        const mx = (a.x + b.x) / 2;
+        const my = (a.y + b.y) / 2 + rowGap * 0.28;
+        bx = (1 - e) * (1 - e) * a.x + 2 * (1 - e) * e * mx + e * e * b.x;
+        by = (1 - e) * (1 - e) * a.y + 2 * (1 - e) * e * my + e * e * b.y;
+        if (p >= 0.98 && curStep !== lastHit) { lastHit = curStep; tick(); }
+      }
+      if (finished && !doneRef.current) { doneRef.current = true; setDone(true); }
+      // Pegs. Peg (r, c) is hit iff the ball's rights at step r equal c.
+      ctx.clearRect(0, 0, W, H);
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c <= r; c++) {
+          const { x, y } = pegXY(r, c);
+          const hit = !!positions && curStep > r && c === positions[r];
+          ctx.beginPath();
+          ctx.arc(x, y, hit ? 4.5 : 3.5, 0, Math.PI * 2);
+          ctx.fillStyle = hit ? '#dfe6ff' : '#aab6ff';
+          ctx.shadowColor = 'rgba(170,182,255,.7)';
+          ctx.shadowBlur = hit ? 10 : 6;
+          ctx.fill();
+          ctx.shadowBlur = 0;
+        }
+      }
+      // Trail.
+      if (positions) {
+        trail.push({ x: bx, y: by });
+        if (trail.length > 14) trail.shift();
+        trail.forEach((pt, i) => {
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, 3 + (i / trail.length) * 6, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(108,92,231,${(i / trail.length) * 0.25})`;
+          ctx.fill();
+        });
+      }
+      // Ball (squash on peg impact).
+      const squash = positions && p > 0.85 ? 1 - (p - 0.85) * 1.2 : 1;
+      ctx.save();
+      ctx.translate(bx, by);
+      ctx.scale(2 - squash, squash);
+      const grad = ctx.createRadialGradient(-3, -4, 2, 0, 0, 11);
+      grad.addColorStop(0, '#ffffff');
+      grad.addColorStop(0.55, '#6c5ce7');
+      grad.addColorStop(1, '#2f2470');
+      ctx.beginPath();
+      ctx.arc(0, 0, 10, 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.shadowColor = 'rgba(108,92,231,.9)';
+      ctx.shadowBlur = 18;
+      ctx.fill();
+      ctx.restore();
+      if (!finished) raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => { cancelAnimationFrame(raf); if (audio) void audio.close().catch(() => {}); };
+  }, [rows, path, pathValid, resultBin, result]);
 
-  const path = useMemo(() => {
-    const rights = new Set(Array.from({ length: finalBin }, (_, j) => Math.floor(((j + 1) * rows) / (finalBin + 1))));
-    let lefts = 0;
-    return Array.from({ length: rows + 1 }, (_, i) => {
-      if (i > 0 && rights.has(i - 1)) lefts += 1;
-      return lefts;
-    });
-  }, [finalBin, rows]);
-
-  const spacing = 38 / Math.max(1, rows / 2);
-  const rowGap = Math.min(31, Math.max(16, Math.floor(295 / Math.max(1, rows))));
-  const ballLeft = 50 + ((path[step] ?? 0) - step / 2) * spacing;
-  const ballTop = 18 + step * rowGap;
+  const pathStr = pathValid && path ? path.map((b) => (b ? 'R' : 'L')).join(' ') : null;
 
   return (
-    <div style={{ width: 'min(560px, 100%)' }}>
-      <div style={{ position: 'relative', height: 30 + rows * rowGap + 48 }}>
-        {Array.from({ length: rows }).map((_, r) =>
-          Array.from({ length: r + 1 }).map((__, i) => (
-            <span
-              key={`${r}-${i}`}
-              style={{
-                position: 'absolute',
-                left: `${50 + (i - r / 2) * spacing}%`,
-                top: 24 + r * rowGap,
-                width: 7,
-                height: 7,
-                borderRadius: '50%',
-                transform: 'translate(-50%, -50%)',
-                background: '#aab6ff',
-                boxShadow: '0 0 8px rgba(170,182,255,.5)',
-              }}
-            />
-          ))
-        )}
-        <span
-          style={{
-            position: 'absolute',
-            left: `${ballLeft}%`,
-            top: ballTop,
-            width: 20,
-            height: 20,
-            borderRadius: '50%',
-            transform: 'translate(-50%, -50%)',
-            background: 'radial-gradient(circle at 35% 30%, #fff, #6c5ce7 55%, #2f2470)',
-            transition: 'left .17s ease-out, top .17s ease-out',
-            animation: 'zsk-ball-pulse .9s ease-in-out infinite',
-          }}
-        />
-      </div>
+    <div style={{ width: 'min(560px, 100%)', margin: '0 auto' }}>
+      <canvas ref={canvasRef} style={{ display: 'block', margin: '0 auto' }} aria-label="Plinko board" />
       <div style={{ display: 'grid', gridTemplateColumns: `repeat(${bins}, 1fr)`, gap: 5, marginTop: 8 }}>
-        {Array.from({ length: bins }).map((_, i) => (
-          <div
-            key={i}
-            style={{
-              minHeight: 34,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              borderRadius: 10,
-              border: '1px solid rgba(255,255,255,.12)',
-              background: result && i === resultBin ? (result.status === 'won' ? '#117a38' : '#8b1e2d') : 'rgba(255,255,255,.07)',
-              fontWeight: 900,
-              transform: result && i === resultBin ? 'scale(1.08)' : undefined,
-              transition: 'all .2s ease',
-            }}
-          >
-            {i}
-          </div>
-        ))}
+        {Array.from({ length: bins }).map((_, i) => {
+          const isWin = done && i === resultBin;
+          const label = multLabel(rows, i) || String(i);
+          return (
+            <div
+              key={i}
+              style={{
+                minHeight: 38,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderRadius: 10,
+                border: '1px solid rgba(255,255,255,.12)',
+                background: isWin ? (result?.status === 'won' ? '#117a38' : '#8b1e2d') : 'rgba(255,255,255,.07)',
+                fontWeight: 900,
+                fontSize: 12,
+                transform: isWin ? 'scale(1.1)' : undefined,
+                transition: 'all .25s ease',
+              }}
+            >
+              <span>{label}</span>
+            </div>
+          );
+        })}
       </div>
-      <div style={{ marginTop: 10, opacity: 0.72 }}>
-        {result?.details?.bin !== undefined ? `Landed in bin ${result.details.bin}` : `Dropping through ${rows} rows…`}
+      <div style={{ marginTop: 10, opacity: 0.72, fontSize: 13 }}>
+        {resultBin === undefined
+          ? 'Waiting for on-chain result — ball drops only once the bin is locked.'
+          : pathValid
+            ? `Landed in bin ${resultBin} · path ${pathStr}`
+            : `Landed in bin ${resultBin} · on-chain path unavailable for this bet, showing settled bin only.`}
       </div>
+      {pathValid && result?.details?.word ? (
+        <div style={{ marginTop: 4, opacity: 0.5, fontSize: 11 }} title={result.details.word}>
+          word {result.details.word.slice(0, 20)}… · bin = popcount(path bits)
+        </div>
+      ) : null}
     </div>
   );
 }

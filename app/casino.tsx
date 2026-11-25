@@ -6,6 +6,7 @@ import { parseEther, formatEther, parseEventLogs, encodeFunctionData } from 'vie
 import { baseSepolia } from 'viem/chains';
 import { getSessionAccount, metaDigest, forwarderAbi, SESSION_DAYS } from '../lib/session';
 import { humanizeError } from '../lib/revert';
+import { derivePlinkoPath } from '../lib/plinko-path';
 import tokenAbi from '../abi/CasinoToken.json';
 import treasuryAbi from '../abi/Treasury.json';
 import flipAbi from '../abi/CoinFlip.json';
@@ -472,6 +473,17 @@ export default function Casino() {
         const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh });
         const res = parseResolved(rrc, plinkoAbi, 'DropResolved');
         if (res) {
+          // Same bit-path replay as the relayer: recompute the contract's
+          // word from the resolve block's prevrandao, attach only on bin match.
+          try {
+            const path = await derivePlinkoPath(
+              publicClient as any, PL, gameId, placed.blockNumber, Number(rrc.blockNumber), rows,
+            );
+            if (res.details?.bin !== undefined && path.bin === res.details.bin) {
+              res.details.path = path.bits;
+              res.details.word = path.word;
+            }
+          } catch { /* cosmetic only */ }
           persistBet({ game_bet_id: placed.gameBetId, game: 'plinko', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
           setAnimation((a) => (a ? { ...a, result: res } : a));
           directSettled = true;
@@ -610,7 +622,7 @@ function parseResolved(rc: any, abi: any, resolvedEvent: string) {
   if (!r) return null;
   const payout = (r.args.payout as bigint).toString();
   const won = resolvedEvent === 'DropResolved' ? BigInt(payout) > 0n : r.args.won === true;
-  const details =
+  const details: { roll?: number; bin?: number; multBps?: string; path?: number[]; word?: string } | undefined =
     resolvedEvent === 'RollResolved'
       ? { roll: Number(r.args.roll) }
       : resolvedEvent === 'DropResolved'
