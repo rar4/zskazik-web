@@ -30,6 +30,12 @@ const WAIT_MS = 2400;
 export default function BetAnimation({ animation, onClose }: { animation: BetAnimationState; onClose: () => void }) {
   const [ready, setReady] = useState(false);
   const [tick, setTick] = useState(0);
+  // Plinko: the result header/metrics stay hidden until the ball has
+  // actually landed (onDone), so the reveal is synced to the drop —
+  // not to the moment the chain result arrives.
+  const [plinkoDone, setPlinkoDone] = useState(false);
+
+  useEffect(() => { setPlinkoDone(false); }, [animation]);
 
   useEffect(() => {
     const t = setTimeout(() => setReady(true), WAIT_MS);
@@ -49,7 +55,9 @@ export default function BetAnimation({ animation, onClose }: { animation: BetAni
     };
   }, []);
 
-  const result = ready ? animation.result ?? null : null;
+  const rawResult = animation.result ?? null;
+  // Flip/Dice keep the timed reveal; Plinko reveals on ball landing.
+  const result = animation.game === 'plinko' ? (plinkoDone ? rawResult : null) : ready ? rawResult : null;
   const won = result?.status === 'won';
 
   return (
@@ -124,13 +132,13 @@ export default function BetAnimation({ animation, onClose }: { animation: BetAni
           {result ? (won ? 'YOU WON' : 'YOU LOST') : 'IN PLAY'}
         </h1>
         <div style={{ opacity: 0.78, minHeight: 22 }}>
-          {result ? resultLine(animation, result) : 'Waiting for on-chain result…'}
+          {result ? resultLine(animation, result) : animation.game === 'plinko' ? 'Bet locked — ball drops the moment the chain result lands…' : 'Waiting for on-chain result…'}
         </div>
 
         <div style={{ minHeight: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 8 }}>
           {animation.game === 'flip' && <CoinAnimation animation={animation} result={result} />}
           {animation.game === 'dice' && <DiceAnimation animation={animation} result={result} tick={tick} />}
-          {animation.game === 'plinko' && <PlinkoAnimation animation={animation} result={result} />}
+          {animation.game === 'plinko' && <PlinkoAnimation animation={animation} result={rawResult} onDone={() => setPlinkoDone(true)} />}
         </div>
 
         <div style={{ display: 'flex', justifyContent: 'center', gap: 12, flexWrap: 'wrap', marginTop: 14 }}>
@@ -275,7 +283,7 @@ function DiceAnimation({ animation, result, tick }: { animation: BetAnimationSta
   );
 }
 
-function PlinkoAnimation({ animation, result }: { animation: BetAnimationState; result: NonNullable<BetAnimationState['result']> | null }) {
+function PlinkoAnimation({ animation, result, onDone }: { animation: BetAnimationState; result: NonNullable<BetAnimationState['result']> | null; onDone?: () => void }) {
   const rows = clamp(animation.rows, 8, 16);
   const bins = rows + 1;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -285,16 +293,24 @@ function PlinkoAnimation({ animation, result }: { animation: BetAnimationState; 
   const path = result?.details?.path;
   // The path is only trustworthy if it reproduces the settled bin. If the
   // relayer/direct path failed to derive it, we show the settled bin without
-  // animating a made-up trajectory.
+  // animating a made-up trajectory — but still reveal the result.
   const pathValid = Array.isArray(path) && path.length === rows && resultBin !== undefined && path.reduce((a, b) => a + (b ? 1 : 0), 0) === resultBin;
 
   useEffect(() => { doneRef.current = false; setDone(false); }, [resultBin, path]);
 
+  // Settled bin without a derivable path: nothing to animate, reveal now.
+  useEffect(() => {
+    if (resultBin !== undefined && !pathValid && path === undefined) {
+      if (!doneRef.current) { doneRef.current = true; setDone(true); onDone?.(); }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resultBin, pathValid, path]);
+
   // Canvas board: ball replays the on-chain bits (bit i = right at row i).
   // Peg positions are in spacing units: at step s the ball has `rights`
   // rights among the first s bits, x-offset = rights - s/2, which is exactly
-  // peg (s, rights). Motion between pegs is cosmetic only (easing, squash,
-  // trail) — it cannot change the bin.
+  // peg (s, rights). Motion between pegs is cosmetic only (gravity, spin,
+  // blur, jitter seeded from the word's high bits) — it cannot change the bin.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -307,7 +323,9 @@ function PlinkoAnimation({ animation, result }: { animation: BetAnimationState; 
     if (!ctx) return;
     const W = 560;
     const rowGap = Math.min(26, Math.floor(340 / rows));
-    const H = 46 + rows * rowGap + 30;
+    const bucketsTop = 30 + rows * rowGap + 10;
+    const bucketH = 46;
+    const H = bucketsTop + bucketH + 8;
     const dpr = Math.min(2, typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
     canvas.width = W * dpr;
     canvas.height = H * dpr;
@@ -316,27 +334,40 @@ function PlinkoAnimation({ animation, result }: { animation: BetAnimationState; 
     canvas.style.height = 'auto'; // preserve aspect; fixed px height distorted the board on narrow screens
     ctx.scale(dpr, dpr);
     const spacing = (W - 40) / rows;
+    const ballR = Math.max(7, Math.min(10, spacing * 0.3)); // fits between pegs, reads as a ball
     const pegXY = (row: number, col: number) => ({ x: W / 2 + (col - row / 2) * spacing, y: 30 + row * rowGap });
     const ballXY = (step: number, rights: number) => ({ x: W / 2 + (rights - step / 2) * spacing, y: 30 + step * rowGap });
+    // Bin slot i is centered on ballXY(rows, i); dividers sit half a
+    // spacing either side, so the resting ball is always inside its slot.
+    const slotCenter = (i: number) => ballXY(rows, i).x;
+    const floorY = bucketsTop + bucketH - ballR - 3;
 
-    // Segment timeline: fall between pegs, accelerating slightly, then a
-    // settle into the bin. Slow-mo the last two segments on high bins.
+    // Segment timeline: gravity fall between pegs, accelerating slightly,
+    // then a bouncing settle into the bucket. Cosmetic duration jitter is
+    // seeded from the word's high bits (bits 16+) — reproducible, and it
+    // cannot affect the outcome bits (0..rows-1).
     const positions = pathValid && path ? pathPositions(path) : null;
+    const wordBig = result?.details?.word ? BigInt(result.details.word) : 0n;
     const segDur: number[] = [];
     if (positions) {
       const mult = result?.details?.multBps ? Number(result.details.multBps) : 0;
       const slow = mult >= 20000 ? 1.6 : 1;
       for (let i = 0; i < rows; i++) {
-        let d = 165 - i * 4;
+        const jitter = Number((wordBig >> BigInt(16 + (i % 8) * 3)) & 7n) - 3.5; // -3.5..3.5
+        let d = 150 - i * 3 + jitter * 9;
         if (i >= rows - 2) d *= slow;
-        segDur.push(Math.max(70, d));
+        segDur.push(Math.max(65, Math.min(280, d)));
       }
-      segDur.push(420); // settle into bin
+      segDur.push(520); // settle into bucket (with bounce)
     }
     const total = segDur.reduce((a, b) => a + b, 0);
     let raf = 0;
     let start = 0;
     let lastHit = -1;
+    let lastT = 0;
+    let prevBx = W / 2;
+    let prevBy = 16;
+    let spin = 0;
     let audio: AudioContext | null = null;
     const trail: { x: number; y: number }[] = [];
     const tick = () => {
@@ -353,8 +384,17 @@ function PlinkoAnimation({ animation, result }: { animation: BetAnimationState; 
         o.stop(audio.currentTime + 0.07);
       } catch { /* sound is cosmetic */ }
     };
+    const easeOutBounce = (x: number) => {
+      const n1 = 7.5625, d1 = 2.75;
+      if (x < 1 / d1) return n1 * x * x;
+      if (x < 2 / d1) return n1 * (x -= 1.5 / d1) * x + 0.75;
+      if (x < 2.5 / d1) return n1 * (x -= 2.25 / d1) * x + 0.9375;
+      return n1 * (x -= 2.625 / d1) * x + 0.984375;
+    };
     const draw = (now: number) => {
-      if (!start) start = now;
+      if (!start) { start = now; lastT = now; }
+      const dt = Math.max(1, now - lastT);
+      lastT = now;
       const t = now - start;
       // Locate segment + local progress.
       let seg = 0;
@@ -366,31 +406,61 @@ function PlinkoAnimation({ animation, result }: { animation: BetAnimationState; 
       const curRights = positions ? positions[curStep] : 0;
       let bx: number, by: number;
       if (!positions) {
-        // Idle: ball hovers at the top until the on-chain path arrives.
+        // Idle: ball sits in the launcher, vibrating with anticipation,
+        // until the on-chain path arrives — then it drops immediately.
         bx = W / 2;
-        by = 16 + Math.sin(now / 320) * 4;
+        by = 16 + Math.sin(now / 140) * 2.5;
       } else if (finished) {
-        const end = ballXY(rows, positions[rows]);
-        bx = end.x; by = end.y + rowGap; // resting inside the bucket slot
+        bx = slotCenter(positions[rows]);
+        by = floorY;
       } else if (seg >= rows) {
-        // Settle segment: drop straight into the bucket.
-        const end = ballXY(rows, positions[rows]);
-        bx = end.x;
-        by = end.y + p * rowGap;
+        // Settle: fall into the bucket slot and bounce on its floor.
+        bx = slotCenter(positions[rows]);
+        const fromY = ballXY(rows, positions[rows]).y;
+        by = fromY + (floorY - fromY) * easeOutBounce(p);
       } else {
         const a = ballXY(curStep, curRights);
         const b = ballXY(curStep + 1, positions[curStep + 1]);
-        const e = p * p * (3 - 2 * p); // smootherstep-ish
-        // Quadratic arc sagging slightly below the straight diagonal.
-        const mx = (a.x + b.x) / 2;
-        const my = (a.y + b.y) / 2 + rowGap * 0.28;
-        bx = (1 - e) * (1 - e) * a.x + 2 * (1 - e) * e * mx + e * e * b.x;
-        by = (1 - e) * (1 - e) * a.y + 2 * (1 - e) * e * my + e * e * b.y;
+        // Horizontal: fast deflection right after the peg, then drift.
+        // Vertical: accelerating gravity fall. Both land exactly on b.
+        const ex = 1 - Math.pow(1 - p, 3);
+        const ey = p * p;
+        bx = a.x + (b.x - a.x) * ex;
+        by = a.y + (b.y - a.y) * ey;
         if (p >= 0.98 && curStep !== lastHit) { lastHit = curStep; tick(); }
       }
-      if (finished && !doneRef.current) { doneRef.current = true; setDone(true); }
+      // Spin follows horizontal travel; velocity drives motion blur.
+      const vx = (bx - prevBx) / dt;
+      const vy = (by - prevBy) / dt;
+      spin += vx * dt * 0.9;
+      const speed = Math.hypot(vx, vy);
+      prevBx = bx; prevBy = by;
+      if (finished && !doneRef.current) { doneRef.current = true; setDone(true); onDone?.(); }
+      // Buckets (drawn every frame; ball rests inside them).
+      for (let i = 0; i < bins; i++) {
+        const x0 = slotCenter(i) - spacing / 2;
+        const x1 = slotCenter(i) + spacing / 2;
+        const isWin = doneRef.current && i === resultBin; // ref (not state): effect must not rerun to highlight
+        ctx.beginPath();
+        ctx.roundRect(x0 + 1.5, bucketsTop, spacing - 3, bucketH, 7);
+        ctx.fillStyle = isWin ? (result?.status === 'won' ? 'rgba(17,122,56,.85)' : 'rgba(139,30,45,.85)') : 'rgba(255,255,255,.07)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,.14)';
+        ctx.stroke();
+        // Slot wall above the bucket mouth — the ball visibly enters a slot.
+        ctx.beginPath();
+        ctx.moveTo(x0 + 1.5, bucketsTop);
+        ctx.lineTo(x0 + 1.5, bucketsTop - 7);
+        ctx.strokeStyle = 'rgba(255,255,255,.25)';
+        ctx.stroke();
+        ctx.fillStyle = '#f4f6ff';
+        ctx.font = '700 11px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(multLabel(rows, i) || String(i), (x0 + x1) / 2, bucketsTop + 11); // label above the resting ball
+      }
       // Pegs. Peg (r, c) is hit iff the ball's rights at step r equal c.
-      ctx.clearRect(0, 0, W, H);
+      ctx.clearRect(0, 0, W, bucketsTop); // keep buckets; clear board area only
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c <= r; c++) {
           const { x, y } = pegXY(r, c);
@@ -404,33 +474,40 @@ function PlinkoAnimation({ animation, result }: { animation: BetAnimationState; 
           ctx.shadowBlur = 0;
         }
       }
-      // Trail.
+      // Trail (fading after-images along the true trajectory).
       if (positions) {
         trail.push({ x: bx, y: by });
-        if (trail.length > 14) trail.shift();
+        if (trail.length > 12) trail.shift();
         trail.forEach((pt, i) => {
           ctx.beginPath();
-          ctx.arc(pt.x, pt.y, 3 + (i / trail.length) * 6, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(108,92,231,${(i / trail.length) * 0.25})`;
+          ctx.arc(pt.x, pt.y, ballR * (0.35 + 0.5 * (i / trail.length)), 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(108,92,231,${(i / trail.length) * 0.22})`;
           ctx.fill();
         });
       }
-      // Ball (squash on peg impact).
-      const squash = positions && p > 0.85 ? 1 - (p - 0.85) * 1.2 : 1;
+      // Ball: motion-blurred ellipse along velocity, spinning highlight.
+      const ang = Math.atan2(vy, vx);
+      const stretch = Math.min(0.55, speed * 0.012);
       ctx.save();
       ctx.translate(bx, by);
-      ctx.scale(2 - squash, squash);
-      const grad = ctx.createRadialGradient(-3, -4, 2, 0, 0, 11);
+      ctx.rotate(positions ? ang : 0);
+      ctx.scale(1 + stretch, 1 - stretch * 0.45);
+      const grad = ctx.createRadialGradient(-ballR * 0.3, -ballR * 0.4, 1, 0, 0, ballR * 1.1);
       grad.addColorStop(0, '#ffffff');
       grad.addColorStop(0.55, '#6c5ce7');
       grad.addColorStop(1, '#2f2470');
       ctx.beginPath();
-      ctx.arc(0, 0, 10, 0, Math.PI * 2);
+      ctx.arc(0, 0, ballR, 0, Math.PI * 2);
       ctx.fillStyle = grad;
       ctx.shadowColor = 'rgba(108,92,231,.9)';
-      ctx.shadowBlur = 18;
+      ctx.shadowBlur = 16;
       ctx.fill();
       ctx.restore();
+      // Spin marker dot (shows rotation; cosmetic only).
+      ctx.beginPath();
+      ctx.arc(bx + Math.cos(spin) * ballR * 0.55, by + Math.sin(spin) * ballR * 0.55, ballR * 0.28, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,.85)';
+      ctx.fill();
       if (!finished) raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
@@ -442,36 +519,9 @@ function PlinkoAnimation({ animation, result }: { animation: BetAnimationState; 
   return (
     <div style={{ width: 'min(560px, 100%)', margin: '0 auto' }}>
       <canvas ref={canvasRef} style={{ display: 'block', margin: '0 auto' }} aria-label="Plinko board" />
-      <div style={{ display: 'grid', gridTemplateColumns: `repeat(${bins}, 1fr)`, gap: 5, marginTop: 8 }}>
-        {Array.from({ length: bins }).map((_, i) => {
-          const isWin = done && i === resultBin;
-          const label = multLabel(rows, i) || String(i);
-          return (
-            <div
-              key={i}
-              style={{
-                minHeight: 38,
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                borderRadius: 10,
-                border: '1px solid rgba(255,255,255,.12)',
-                background: isWin ? (result?.status === 'won' ? '#117a38' : '#8b1e2d') : 'rgba(255,255,255,.07)',
-                fontWeight: 900,
-                fontSize: 12,
-                transform: isWin ? 'scale(1.1)' : undefined,
-                transition: 'all .25s ease',
-              }}
-            >
-              <span>{label}</span>
-            </div>
-          );
-        })}
-      </div>
       <div style={{ marginTop: 10, opacity: 0.72, fontSize: 13, lineHeight: 1.55, overflowWrap: 'anywhere', maxWidth: 560, marginLeft: 'auto', marginRight: 'auto' }}>
         {resultBin === undefined
-          ? 'Waiting for on-chain result — ball drops only once the bin is locked.'
+          ? 'Bet locked — ball drops the moment the chain result lands…'
           : pathValid
             ? `Landed in bin ${resultBin} · path ${pathStr}`
             : `Landed in bin ${resultBin} · on-chain path unavailable for this bet, showing settled bin only.`}

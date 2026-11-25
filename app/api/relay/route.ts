@@ -120,7 +120,10 @@ export async function POST(req: Request) {
       details?: { roll?: number; bin?: number; multBps?: string; path?: number[]; word?: string };
     } | null = null;
     if (gameBetId) {
-      await waitBlocks(2);
+      // One block is enough: resolve() only requires a LATER block than
+      // placement, and the resolve tx lands after this wait regardless.
+      // Waiting 2 blocks added ~2s of dead air before the ball could drop.
+      await waitBlocks(1);
       resolveHash = await wallet.writeContract({
         address: target,
         abi: gameAbi as any,
