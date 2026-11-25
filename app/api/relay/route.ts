@@ -36,6 +36,12 @@ const GAME_BY_ADDR: Record<string, string> = {
   [ADDR.plinko.toLowerCase()]: 'plinko',
 };
 
+// Explicit gas (measured from real receipts, like the wallet path): without
+// a limit viem runs estimateGas + fee fetch on every tx, adding ~200-400ms
+// per tx to the place+resolve critical path.
+const GAS_PLACE = 1_500_000n;
+const GAS_RESOLVE = 800_000n;
+
 // Fast RPC for the relayer: publicnode allows wide getLogs ranges and is
 // low-latency; sepolia.base.org caps getLogs at 200 blocks.
 const RPC = 'https://base-sepolia-rpc.publicnode.com';
@@ -49,12 +55,17 @@ function relayer() {
 
 async function waitBlocks(n: number) {
   const start = await client.getBlockNumber();
+  // 250ms poll (was 800ms): on 2s blocks the coarse poll added up to
+  // 800ms of pure dead air before resolve could be submitted.
   while ((await client.getBlockNumber()) < start + BigInt(n)) {
-    await new Promise((r) => setTimeout(r, 800));
+    await new Promise((r) => setTimeout(r, 250));
   }
 }
 
 export async function POST(req: Request) {
+  const t0 = Date.now();
+  const timings: Record<string, number> = {};
+  const mark = (k: string) => { timings[k] = Date.now() - t0; };
   try {
     const { user, target, callData, signature } = await req.json();
     if (!user || !target || !callData || !signature) {
@@ -67,13 +78,9 @@ export async function POST(req: Request) {
     const wallet = relayer();
     // Preflight: simulate the meta-tx before paying gas for it. Without
     // this, a doomed bet (e.g. allowance < wager) reverts on-chain and the
-    // user only sees the forwarder's wrapper selector 0x7e256957.
-    const active = await client.readContract({
-      address: ADDR.forwarder, abi: forwarderAbi, functionName: 'isSessionActive', args: [user],
-    } as any).catch(() => false);
-    if (!active) {
-      return NextResponse.json({ error: 'SessionNotSet/SessionExpired — register the session key first' }, { status: 400 });
-    }
+    // user only sees the forwarder's wrapper selector 0x7e256957. The
+    // simulation covers isSessionActive too (inactive session = revert),
+    // so the separate read was pure latency — one RPC off the path.
     try {
       const simData = encodeFunctionData({
         abi: forwarderAbi, functionName: 'executeMetaTransaction', args: [user, target, callData, signature],
@@ -86,13 +93,17 @@ export async function POST(req: Request) {
     } catch (simErr: any) {
       return NextResponse.json({ error: humanizeError(simErr), code: 'PREFLIGHT_REVERT' }, { status: 400 });
     }
+    mark('simulated');
     const hash = await wallet.writeContract({
       address: ADDR.forwarder,
       abi: forwarderAbi as any,
       functionName: 'executeMetaTransaction',
       args: [user, target, callData, signature],
+      gas: GAS_PLACE,
     } as any);
+    mark('placeBroadcast');
     const receipt = await client.waitForTransactionReceipt({ hash });
+    mark('placeMined');
     if (receipt.status !== 'success') {
       return NextResponse.json({ error: 'meta-tx reverted', hash }, { status: 500 });
     }
@@ -101,9 +112,10 @@ export async function POST(req: Request) {
     let gameBetId: string | null = placed?.args?.gameBetId ?? null;
     const game = GAME_BY_ADDR[String(target).toLowerCase()];
     // Write-through: record the bet in the persistent log at placement
-    // time (recordBet never throws, so a DB outage can't fail the bet).
+    // time. Fire-and-forget: it runs concurrently with the resolve wait
+    // below instead of blocking it (recordBet never throws anyway).
     if (placed && game) {
-      await recordBet({
+      void recordBet({
         game_bet_id: placed.args.gameBetId as string,
         game,
         player: placed.args.player as string,
@@ -124,13 +136,17 @@ export async function POST(req: Request) {
       // placement, and the resolve tx lands after this wait regardless.
       // Waiting 2 blocks added ~2s of dead air before the ball could drop.
       await waitBlocks(1);
+      mark('resolveReady');
       resolveHash = await wallet.writeContract({
         address: target,
         abi: gameAbi as any,
         functionName: 'resolve',
         args: [gameBetId],
+        gas: GAS_RESOLVE,
       } as any);
+      mark('resolveBroadcast');
       const resolveReceipt = await client.waitForTransactionReceipt({ hash: resolveHash as Hex });
+      mark('resolveMined');
       const resolvedLogs = parseEventLogs({ abi: gameAbi, logs: resolveReceipt.logs }) as any[];
       const resolved = resolvedLogs.find((l) => RESOLVED_EVENTS.includes(l.eventName));
       if (resolved && placed && game) {
@@ -167,7 +183,9 @@ export async function POST(req: Request) {
             // Path is cosmetic; the settled result above stands on its own.
           }
         }
-        await recordBet({
+        // The result is already computed above, so the DB write must
+        // not delay the response the ball is waiting on.
+        void recordBet({
           game_bet_id: gameBetId,
           game,
           player: placed.args.player as string,
@@ -178,7 +196,8 @@ export async function POST(req: Request) {
         });
       }
     }
-    return NextResponse.json({ hash, gameBetId, resolveHash, result, blockNumber: Number(receipt.blockNumber) });
+    mark('done');
+    return NextResponse.json({ hash, gameBetId, resolveHash, result, blockNumber: Number(receipt.blockNumber), timings });
   } catch (e: any) {
     return NextResponse.json({ error: humanizeError(e) }, { status: 500 });
   }

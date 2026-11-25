@@ -132,7 +132,7 @@ export default function BetAnimation({ animation, onClose }: { animation: BetAni
           {result ? (won ? 'YOU WON' : 'YOU LOST') : 'IN PLAY'}
         </h1>
         <div style={{ opacity: 0.78, minHeight: 22 }}>
-          {result ? resultLine(animation, result) : animation.game === 'plinko' ? 'Bet locked — ball drops the moment the chain result lands…' : 'Waiting for on-chain result…'}
+          {result ? resultLine(animation, result) : animation.game === 'plinko' ? 'Anticipation — the ball drops for real once the chain result lands' : 'Waiting for on-chain result…'}
         </div>
 
         <div style={{ minHeight: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 8 }}>
@@ -417,10 +417,16 @@ function PlinkoAnimation({ animation, result, onDone }: { animation: BetAnimatio
       const curRights = positions ? positions[curStep] : 0;
       let bx: number, by: number;
       if (!positions) {
-        // Idle: ball sits in the launcher, vibrating with anticipation,
-        // until the on-chain path arrives — then it drops immediately.
+        // Idle/anticipation: the ball bounces in the launcher on a loop
+        // (drop ~10px, bounce, spin) while the chain settles the bet. It
+        // never enters a peg path here — any early bounce would constrain
+        // the reachable bins and could not be the true on-chain path, so
+        // anticipation stays above the board and the real drop only
+        // starts once the settled bits arrive.
+        const bounce = Math.abs(Math.sin(now / 210));
         bx = W / 2;
-        by = 16 + Math.sin(now / 140) * 2.5;
+        by = 16 + bounce * bounce * 12;
+        spin += 0.22;
       } else if (finished) {
         bx = slotCenter(positions[rows]);
         by = floorY;
@@ -486,16 +492,20 @@ function PlinkoAnimation({ animation, result, onDone }: { animation: BetAnimatio
         ctx.fillText(label, (x0 + x1) / 2, labelY);
       }
       // Pegs. Peg (r, c) is hit iff the ball's rights at step r equal c.
-      // (Whole frame is already cleared above; buckets need no re-clear.)
+      // Before the settled path arrives, a glow wave sweeps down the rows
+      // (cosmetic anticipation only — it never implies a trajectory; the
+      // ball is still held in the launcher above the board).
+      const sweepRow = positions ? -1 : Math.floor(now / 160) % rows;
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c <= r; c++) {
           const { x, y } = pegXY(r, c);
           const hit = !!positions && curStep > r && c === positions[r];
+          const swept = r === sweepRow;
           ctx.beginPath();
-          ctx.arc(x, y, hit ? 4.5 : 3.5, 0, Math.PI * 2);
-          ctx.fillStyle = hit ? '#dfe6ff' : '#aab6ff';
+          ctx.arc(x, y, hit ? 4.5 : swept ? 4 : 3.5, 0, Math.PI * 2);
+          ctx.fillStyle = hit ? '#dfe6ff' : swept ? '#ffffff' : '#aab6ff';
           ctx.shadowColor = 'rgba(170,182,255,.7)';
-          ctx.shadowBlur = hit ? 10 : 6;
+          ctx.shadowBlur = hit ? 10 : swept ? 14 : 6;
           ctx.fill();
           ctx.shadowBlur = 0;
         }
@@ -547,7 +557,7 @@ function PlinkoAnimation({ animation, result, onDone }: { animation: BetAnimatio
       <canvas ref={canvasRef} style={{ display: 'block', margin: '0 auto' }} aria-label="Plinko board" />
       <div style={{ marginTop: 10, opacity: 0.72, fontSize: 13, lineHeight: 1.55, overflowWrap: 'anywhere', maxWidth: 560, marginLeft: 'auto', marginRight: 'auto' }}>
         {resultBin === undefined
-          ? 'Bet locked — ball drops the moment the chain result lands…'
+          ? 'Anticipation — ball held in the launcher until the chain result lands…'
           : pathValid
             ? `Landed in bin ${resultBin} · path ${pathStr}`
             : `Landed in bin ${resultBin} · on-chain path unavailable for this bet, showing settled bin only.`}
