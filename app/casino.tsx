@@ -79,7 +79,6 @@ export default function Casino() {
   const [animation, setAnimation] = useState<BetAnimationState | null>(null);
   const [approving, setApproving] = useState(false);
   const [msg, setMsg] = useState('');
-  const [bankroll, setBankroll] = useState('0');
   const [bets, setBets] = useState<Bet[]>([]);
   const [betsLoaded, setBetsLoaded] = useState(false);
 
@@ -190,7 +189,6 @@ export default function Casino() {
   publicClientRef.current = publicClient;
 
   const betsRef = useRef<Bet[]>([]);
-  const bankrollRef = useRef('0');
   const cacheKey = address ? `zskazik-bets-${address.toLowerCase()}` : null;
   // History append rule: a bet enters history ONLY once it has a result
   // (won/lost). Escrowed/placed rows are never shown. On settle we append
@@ -223,14 +221,6 @@ export default function Casino() {
     refetchBalance();
     refetchAllowance();
     refetchSession();
-    try {
-      const r = await fetch(`/api/bankroll`);
-      const j = await r.json();
-      if (j.bankroll && j.bankroll !== bankrollRef.current) {
-        bankrollRef.current = j.bankroll;
-        setBankroll(j.bankroll);
-      }
-    } catch {}
     try {
       // Hard timeout: a hung request must never leave the spinner up.
       const ctrl = new AbortController();
@@ -569,7 +559,6 @@ export default function Casino() {
           </button>
         </div>
       )}
-      <div style={S.muted}>bankroll: {fmt(bankroll)} ZSK · testnet randomness — mainnet needs VRF</div>
       <div style={S.tabs}>
         {(['flip', 'dice', 'plinko', 'history'] as Tab[]).map((t) => (
           <button key={t} style={S.tab(tab === t)} onClick={() => setTab(t)}>{t}</button>
