@@ -324,7 +324,10 @@ function PlinkoAnimation({ animation, result, onDone }: { animation: BetAnimatio
     const W = 560;
     const rowGap = Math.min(26, Math.floor(340 / rows));
     const bucketsTop = 30 + rows * rowGap + 10;
-    const bucketH = 46;
+    // Taller buckets leave room for the multiplier label BELOW the
+    // resting ball — never under it (a ball drawn after the buckets
+    // would cover a label at the bucket top while it settles).
+    const bucketH = 56;
     const H = bucketsTop + bucketH + 8;
     const dpr = Math.min(2, typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
     canvas.width = W * dpr;
@@ -333,14 +336,22 @@ function PlinkoAnimation({ animation, result, onDone }: { animation: BetAnimatio
     canvas.style.maxWidth = '100%';
     canvas.style.height = 'auto'; // preserve aspect; fixed px height distorted the board on narrow screens
     ctx.scale(dpr, dpr);
-    const spacing = (W - 40) / rows;
+    // Reserve a half-spacing margin at each edge: there are rows+1 bins
+    // (one per slot centre), so spacing = (W - 2*EDGE) / (rows + 1) puts
+    // the leftmost bucket edge exactly at EDGE and the rightmost at
+    // W - EDGE. The old (W - 40) / rows put both outer buckets off-canvas
+    // (rows=8: left edge at -12.5px, right at 572.5px on a 560px board).
+    const EDGE = 6;
+    const spacing = (W - EDGE * 2) / (rows + 1);
+    const labelFont = Math.max(10, Math.min(14, spacing * 0.4));
     const ballR = Math.max(7, Math.min(10, spacing * 0.3)); // fits between pegs, reads as a ball
     const pegXY = (row: number, col: number) => ({ x: W / 2 + (col - row / 2) * spacing, y: 30 + row * rowGap });
     const ballXY = (step: number, rights: number) => ({ x: W / 2 + (rights - step / 2) * spacing, y: 30 + step * rowGap });
     // Bin slot i is centered on ballXY(rows, i); dividers sit half a
     // spacing either side, so the resting ball is always inside its slot.
     const slotCenter = (i: number) => ballXY(rows, i).x;
-    const floorY = bucketsTop + bucketH - ballR - 3;
+    // Resting ball sits above the multiplier label line (see bucketH).
+    const floorY = bucketsTop + bucketH - ballR - 18;
 
     // Segment timeline: gravity fall between pegs, accelerating slightly,
     // then a bouncing settle into the bucket. Cosmetic duration jitter is
@@ -436,6 +447,11 @@ function PlinkoAnimation({ animation, result, onDone }: { animation: BetAnimatio
       const speed = Math.hypot(vx, vy);
       prevBx = bx; prevBy = by;
       if (finished && !doneRef.current) { doneRef.current = true; setDone(true); onDone?.(); }
+      // Clear the WHOLE frame, bucket strip included. Clearing only the
+      // board area (the old clearRect(0, 0, W, bucketsTop)) never erased
+      // trail/ball after-images that fell into the buckets, so they
+      // accumulated over the multiplier labels frame after frame.
+      ctx.clearRect(0, 0, W, H);
       // Buckets (drawn every frame; ball rests inside them).
       for (let i = 0; i < bins; i++) {
         const x0 = slotCenter(i) - spacing / 2;
@@ -453,14 +469,24 @@ function PlinkoAnimation({ animation, result, onDone }: { animation: BetAnimatio
         ctx.lineTo(x0 + 1.5, bucketsTop - 7);
         ctx.strokeStyle = 'rgba(255,255,255,.25)';
         ctx.stroke();
-        ctx.fillStyle = '#f4f6ff';
-        ctx.font = '700 11px system-ui, sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.font = `800 ${labelFont}px system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(multLabel(rows, i) || String(i), (x0 + x1) / 2, bucketsTop + 11); // label above the resting ball
+        // Label sits at the bucket floor, below the resting ball, on a
+        // dark pill so it stays readable on the highlighted win bucket.
+        const labelY = bucketsTop + bucketH - 10;
+        const label = multLabel(rows, i) || String(i);
+        const labelW = Math.min(spacing - 4, ctx.measureText(label).width + 8);
+        ctx.beginPath();
+        ctx.roundRect((x0 + x1) / 2 - labelW / 2, labelY - labelFont / 2 - 2, labelW, labelFont + 4, 4);
+        ctx.fillStyle = 'rgba(0,0,0,.45)';
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.fillText(label, (x0 + x1) / 2, labelY);
       }
       // Pegs. Peg (r, c) is hit iff the ball's rights at step r equal c.
-      ctx.clearRect(0, 0, W, bucketsTop); // keep buckets; clear board area only
+      // (Whole frame is already cleared above; buckets need no re-clear.)
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c <= r; c++) {
           const { x, y } = pegXY(r, c);
