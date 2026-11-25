@@ -2,11 +2,11 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useAccount, usePublicClient, useReadContract, useSwitchChain, useWalletClient } from 'wagmi';
-import { parseEther, formatEther, parseEventLogs, encodeFunctionData } from 'viem';
+import { parseEther, formatEther, parseEventLogs, encodeFunctionData, maxUint256 } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { getSessionAccount, metaDigest, forwarderAbi, SESSION_DAYS } from '../lib/session';
 import { humanizeError } from '../lib/revert';
-import { derivePlinkoPath, PLINKO_MULT_BPS } from '../lib/plinko-path';
+import { derivePlinkoPath, PLINKO_MULT_BPS, multLabel } from '../lib/plinko-path';
 import tokenAbi from '../abi/CasinoToken.json';
 import treasuryAbi from '../abi/Treasury.json';
 import flipAbi from '../abi/CoinFlip.json';
@@ -274,24 +274,18 @@ export default function Casino() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address]);
 
-  // One-time approval for the whole session: approve the user's full ZSK
-  // balance (finite, so wallets don't block it like unlimited approvals),
-  // not just one wager - covers many bets with a single popup.
+  // One-time unlimited approval: maxUint256 is treated as infinite by
+  // OpenZeppelin ERC20 (never decremented), so the allowance never runs
+  // down and blocks a large wager again. The Treasury escrow still pulls
+  // via transferFrom on-chain, so an approval must exist — it just never
+  // needs renewing. Covers every bet size with a single popup.
   const ensureApproved = async (): Promise<boolean> => {
     if (!wallet || approving) return false;
     if (!T || !TR) {
       setMsg('config error: contract addresses missing');
       return false;
     }
-    // Fresh balance (not the possibly stale cached one) so the approval
-    // covers this wager even if the balance refetch hasn't landed yet.
-    let freshBal: bigint = wagerWei!;
-    try {
-      freshBal = (await publicClient!.readContract({
-        address: T, abi: tokenAbi, functionName: 'balanceOf', args: [address!],
-      } as any)) as bigint;
-    } catch {}
-    const amount = freshBal > wagerWei! ? freshBal : wagerWei!;
+    const amount = maxUint256;
     setApproving(true);
     try {
       setMsg('approving treasury for 1-click betting… confirm in your wallet (one-time)');
@@ -585,6 +579,32 @@ export default function Casino() {
           {tab === 'dice' && <div style={S.muted}>target {targetNum} → pays {(98 / (100 - targetNum)).toFixed(2)}x on roll ≥ {targetNum} (2% edge)</div>}
           {tab === 'dice' && maxWinMult !== null && 98 / (100 - targetNum) > maxWinMult && <div style={{ color: '#ff9', marginTop: 4 }}>target too high — payout would exceed the house max win ({maxWinMult}x), lower it</div>}
           {tab === 'flip' && <div style={S.muted}>pays 1.96x (2% edge)</div>}
+          {tab === 'plinko' && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ ...S.muted, marginBottom: 6 }}>bucket multipliers — {rows} rows, left to right (same labels as the live board)</div>
+              <div style={{ display: 'flex', gap: 4 }} aria-label={`Plinko ${rows}-row bucket multipliers`}>
+                {(PLINKO_MULT_BPS[rows] ?? []).map((bps, i) => {
+                  const x = bps / 10000;
+                  const color = x >= 10 ? '#ffd166' : x >= 2 ? '#7bf1a8' : x >= 1 ? '#dfe6ff' : '#8a94b8';
+                  return (
+                    <div
+                      key={i}
+                      title={`bin ${i}: ${multLabel(rows, i)}`}
+                      style={{
+                        flex: 1, minWidth: 0, padding: '7px 0', textAlign: 'center',
+                        borderRadius: 8, border: '1px solid rgba(255,255,255,.14)',
+                        background: 'rgba(255,255,255,.06)', color,
+                        fontWeight: 800, fontSize: rows >= 16 ? 10 : rows >= 12 ? 11 : 13,
+                        whiteSpace: 'nowrap', overflow: 'hidden',
+                      }}
+                    >
+                      {multLabel(rows, i)}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {tab === 'plinko' && <div style={S.muted}>pays by bin table, up to 16x on 16 rows</div>}
           <div style={S.row}>
             <button style={{ ...S.btn, opacity: (pending || placing || approving || settingUp) ? 0.7 : 1, cursor: (pending || placing || approving || settingUp) ? 'wait' : 'pointer' }} disabled={!isConnected || pending !== null || placing || approving || settingUp || wrongChain || !wagerValid || insufficientBalance} onClick={play}>
