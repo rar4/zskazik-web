@@ -127,7 +127,7 @@ export default function BetAnimation({ animation, onClose }: { animation: BetAni
           {result ? resultLine(animation, result) : 'Waiting for on-chain result…'}
         </div>
 
-        <div style={{ height: 'clamp(280px, 48vh, 430px)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 8 }}>
+        <div style={{ minHeight: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 8 }}>
           {animation.game === 'flip' && <CoinAnimation animation={animation} result={result} />}
           {animation.game === 'dice' && <DiceAnimation animation={animation} result={result} tick={tick} />}
           {animation.game === 'plinko' && <PlinkoAnimation animation={animation} result={result} />}
@@ -313,7 +313,7 @@ function PlinkoAnimation({ animation, result }: { animation: BetAnimationState; 
     canvas.height = H * dpr;
     canvas.style.width = `${W}px`;
     canvas.style.maxWidth = '100%';
-    canvas.style.height = `${H}px`;
+    canvas.style.height = 'auto'; // preserve aspect; fixed px height distorted the board on narrow screens
     ctx.scale(dpr, dpr);
     const spacing = (W - 40) / rows;
     const pegXY = (row: number, col: number) => ({ x: W / 2 + (col - row / 2) * spacing, y: 30 + row * rowGap });
@@ -469,7 +469,7 @@ function PlinkoAnimation({ animation, result }: { animation: BetAnimationState; 
           );
         })}
       </div>
-      <div style={{ marginTop: 10, opacity: 0.72, fontSize: 13 }}>
+      <div style={{ marginTop: 10, opacity: 0.72, fontSize: 13, lineHeight: 1.55, overflowWrap: 'anywhere', maxWidth: 560, marginLeft: 'auto', marginRight: 'auto' }}>
         {resultBin === undefined
           ? 'Waiting for on-chain result — ball drops only once the bin is locked.'
           : pathValid
