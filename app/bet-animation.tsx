@@ -298,6 +298,11 @@ function PlinkoAnimation({ animation, result }: { animation: BetAnimationState; 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    // NOTE: this effect deliberately does NOT depend on the `result`
+    // object identity. The parent creates a new object on every update,
+    // and depending on it restarted the ball from the top (multiple
+    // falls per bet). It reruns only when the settled bin/path change,
+    // so the ball falls exactly once per result — into the chain bin.
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     const W = 560;
@@ -366,12 +371,12 @@ function PlinkoAnimation({ animation, result }: { animation: BetAnimationState; 
         by = 16 + Math.sin(now / 320) * 4;
       } else if (finished) {
         const end = ballXY(rows, positions[rows]);
-        bx = end.x; by = end.y + 16;
+        bx = end.x; by = end.y + rowGap; // resting inside the bucket slot
       } else if (seg >= rows) {
-        // Settle segment: drop straight into the bin slot.
+        // Settle segment: drop straight into the bucket.
         const end = ballXY(rows, positions[rows]);
         bx = end.x;
-        by = end.y + p * 16;
+        by = end.y + p * rowGap;
       } else {
         const a = ballXY(curStep, curRights);
         const b = ballXY(curStep + 1, positions[curStep + 1]);
@@ -430,7 +435,7 @@ function PlinkoAnimation({ animation, result }: { animation: BetAnimationState; 
     };
     raf = requestAnimationFrame(draw);
     return () => { cancelAnimationFrame(raf); if (audio) void audio.close().catch(() => {}); };
-  }, [rows, path, pathValid, resultBin, result]);
+  }, [rows, path, pathValid, resultBin]);
 
   const pathStr = pathValid && path ? path.map((b) => (b ? 'R' : 'L')).join(' ') : null;
 

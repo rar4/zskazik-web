@@ -6,7 +6,7 @@ import { parseEther, formatEther, parseEventLogs, encodeFunctionData } from 'vie
 import { baseSepolia } from 'viem/chains';
 import { getSessionAccount, metaDigest, forwarderAbi, SESSION_DAYS } from '../lib/session';
 import { humanizeError } from '../lib/revert';
-import { derivePlinkoPath } from '../lib/plinko-path';
+import { derivePlinkoPath, PLINKO_MULT_BPS } from '../lib/plinko-path';
 import tokenAbi from '../abi/CasinoToken.json';
 import treasuryAbi from '../abi/Treasury.json';
 import flipAbi from '../abi/CoinFlip.json';
@@ -134,6 +134,22 @@ export default function Casino() {
   const sessionActive = sessionActiveData === true;
   const [settingUp, setSettingUp] = useState(false);
 
+  // House max-win cap: Plinko/Dice placement reverts when the worst-case
+  // payout exceeds wager * cap. Read it so the UI can disable options
+  // that could never be placed, instead of failing after signing.
+  const { data: maxMultData } = useReadContract({
+    address: TR,
+    abi: treasuryAbi as any,
+    functionName: 'maxWinMultiplier',
+    query: { enabled: !!TR },
+  });
+  const maxWinMult = maxMultData !== undefined ? Number(maxMultData as bigint) : null;
+  const rowsBlocked = (r: number) => {
+    const t = PLINKO_MULT_BPS[r];
+    if (!t || maxWinMult === null) return false;
+    return Math.max(...t) / 10000 > maxWinMult;
+  };
+
   // One-time setup (1 popup): authorise the browser session key for 30 days.
   // After this, bets need 0 popups - session key signs off-chain, relayer submits.
   const ensureSession = async (): Promise<boolean> => {
@@ -175,9 +191,23 @@ export default function Casino() {
 
   const betsRef = useRef<Bet[]>([]);
   const bankrollRef = useRef('0');
+  const cacheKey = address ? `zskazik-bets-${address.toLowerCase()}` : null;
+  // History append rule: a bet enters history ONLY once it has a result
+  // (won/lost). Escrowed/placed rows are never shown. On settle we append
+  // locally and instantly (no wait for the 6s poll / chain scan), then the
+  // next poll reconciles against the server list without dropping it.
+  const appendSettledBet = (bet: Bet) => {
+    if (bet.status !== 'won' && bet.status !== 'lost') return;
+    if (betsRef.current.some((b) => b.game_bet_id === bet.game_bet_id)) return;
+    const next = [bet, ...betsRef.current].sort(
+      (a, b) => b.block_number - a.block_number || b.game_bet_id.localeCompare(a.game_bet_id)
+    );
+    betsRef.current = next;
+    setBets(next);
+    try { if (cacheKey) localStorage.setItem(cacheKey, JSON.stringify(next)); } catch {}
+  };
   // Persisted history: cached per player in localStorage so a refresh shows
   // the full history instantly, then the chain scan refreshes it in place.
-  const cacheKey = address ? `zskazik-bets-${address.toLowerCase()}` : null;
   const loadRef = useRef(false);
   const load = async () => {
     // In-flight guard: the 6s interval must not stack polls on top of a
@@ -212,14 +242,19 @@ export default function Casino() {
       } finally {
         clearTimeout(timer);
       }
-      // Only replace state when the data actually changed - replacing the
-      // array every 6s re-renders every row and makes history flicker.
-      // On fetch failure keep the old list (never flash "no bets yet").
-      if (Array.isArray(data) && JSON.stringify(data) !== JSON.stringify(betsRef.current)) {
-        betsRef.current = data;
-        setBets(data);
-        // Persist to localStorage so history survives refresh.
-        try { if (cacheKey) localStorage.setItem(cacheKey, JSON.stringify(data)); } catch {}
+      // Only settled bets belong in history; merge (don't replace) so a
+      // just-settled local append isn't dropped by a poll that started
+      // before the server list included it.
+      if (Array.isArray(data)) {
+        const settled = data.filter((b: Bet) => b.status === 'won' || b.status === 'lost');
+        const merged = [...settled, ...betsRef.current.filter((b) => !settled.some((s: Bet) => s.game_bet_id === b.game_bet_id))]
+          .sort((a: Bet, b: Bet) => b.block_number - a.block_number || b.game_bet_id.localeCompare(a.game_bet_id));
+        if (JSON.stringify(merged) !== JSON.stringify(betsRef.current)) {
+          betsRef.current = merged;
+          setBets(merged);
+          // Persist to localStorage so history survives refresh.
+          try { if (cacheKey) localStorage.setItem(cacheKey, JSON.stringify(merged)); } catch {}
+        }
       }
     } catch {
       // Timed out / failed: keep whatever list we have, stop spinning.
@@ -234,9 +269,10 @@ export default function Casino() {
       const cached = cacheKey ? localStorage.getItem(cacheKey) : null;
       if (cached) {
         const parsed = JSON.parse(cached);
-        if (Array.isArray(parsed) && parsed.length) {
-          betsRef.current = parsed;
-          setBets(parsed);
+        const settled = Array.isArray(parsed) ? parsed.filter((b: Bet) => b.status === 'won' || b.status === 'lost') : [];
+        if (settled.length) {
+          betsRef.current = settled;
+          setBets(settled);
           setBetsLoaded(true);
         }
       }
@@ -404,6 +440,19 @@ export default function Casino() {
         if (!res.ok) throw new Error(j.error || 'relay failed');
         if (j.result) {
           setAnimation((a) => (a ? { ...a, result: j.result } : a));
+          // Append to history now that it has a result — instantly, without
+          // waiting for the poll/scan. Escrowed bets never enter history.
+          if (j.gameBetId) {
+            appendSettledBet({
+              game_bet_id: j.gameBetId,
+              game: tab === 'flip' ? 'coinflip' : tab === 'dice' ? 'dice' : 'plinko',
+              player: address,
+              wager: wagerWei!.toString(),
+              payout: j.result.payout,
+              status: j.result.status,
+              block_number: j.blockNumber ?? 0,
+            });
+          }
         } else {
           setAnimation(null);
         }
@@ -434,13 +483,13 @@ export default function Casino() {
         const rc = await publicClient!.waitForTransactionReceipt({ hash: h });
         const placed = parsePlaced(rc, flipAbi, 'FlipPlaced');
         gameId = placed.gameBetId;
-        persistBet({ game_bet_id: placed.gameBetId, game: 'coinflip', player: placed.player, wager: placed.wager, status: 'escrowed', block_number: placed.blockNumber });
         setPending(gameId); setMsg('flipped — resolving…');
         await waitBlocks(2);
         const rh = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
         const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh });
         const res = parseResolved(rrc, flipAbi, 'FlipResolved');
         if (res) {
+          appendSettledBet({ game_bet_id: placed.gameBetId, game: 'coinflip', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
           persistBet({ game_bet_id: placed.gameBetId, game: 'coinflip', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
           setAnimation((a) => (a ? { ...a, result: res } : a));
           directSettled = true;
@@ -450,13 +499,13 @@ export default function Casino() {
         const rc = await publicClient!.waitForTransactionReceipt({ hash: h });
         const placed = parsePlaced(rc, diceAbi, 'RollPlaced');
         gameId = placed.gameBetId;
-        persistBet({ game_bet_id: placed.gameBetId, game: 'dice', player: placed.player, wager: placed.wager, status: 'escrowed', block_number: placed.blockNumber });
         setPending(gameId); setMsg('rolled — resolving…');
         await waitBlocks(2);
         const rh = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
         const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh });
         const res = parseResolved(rrc, diceAbi, 'RollResolved');
         if (res) {
+          appendSettledBet({ game_bet_id: placed.gameBetId, game: 'dice', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
           persistBet({ game_bet_id: placed.gameBetId, game: 'dice', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
           setAnimation((a) => (a ? { ...a, result: res } : a));
           directSettled = true;
@@ -466,7 +515,6 @@ export default function Casino() {
         const rc = await publicClient!.waitForTransactionReceipt({ hash: h });
         const placed = parsePlaced(rc, plinkoAbi, 'DropPlaced');
         gameId = placed.gameBetId;
-        persistBet({ game_bet_id: placed.gameBetId, game: 'plinko', player: placed.player, wager: placed.wager, status: 'escrowed', block_number: placed.blockNumber });
         setPending(gameId); setMsg('dropped — resolving…');
         await waitBlocks(2);
         const rh = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
@@ -484,6 +532,7 @@ export default function Casino() {
               res.details.word = path.word;
             }
           } catch { /* cosmetic only */ }
+          appendSettledBet({ game_bet_id: placed.gameBetId, game: 'plinko', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
           persistBet({ game_bet_id: placed.gameBetId, game: 'plinko', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
           setAnimation((a) => (a ? { ...a, result: res } : a));
           directSettled = true;
@@ -538,11 +587,14 @@ export default function Casino() {
             )}
             {tab === 'plinko' && (
               <select value={rows} onChange={(e) => setRows(Number(e.target.value))} style={S.input as any}>
-                <option value={8}>8 rows</option><option value={12}>12 rows</option><option value={16}>16 rows</option>
+                <option value={8} disabled={rowsBlocked(8)}>8 rows{rowsBlocked(8) ? ' (over house max win)' : ''}</option>
+                <option value={12} disabled={rowsBlocked(12)}>12 rows{rowsBlocked(12) ? ' (over house max win)' : ''}</option>
+                <option value={16} disabled={rowsBlocked(16)}>16 rows{rowsBlocked(16) ? ' (over house max win)' : ''}</option>
               </select>
             )}
           </div>
           {tab === 'dice' && <div style={S.muted}>target {targetNum} → pays {(98 / (100 - targetNum)).toFixed(2)}x on roll ≥ {targetNum} (2% edge)</div>}
+          {tab === 'dice' && maxWinMult !== null && 98 / (100 - targetNum) > maxWinMult && <div style={{ color: '#ff9', marginTop: 4 }}>target too high — payout would exceed the house max win ({maxWinMult}x), lower it</div>}
           {tab === 'flip' && <div style={S.muted}>pays 1.96x (2% edge)</div>}
           {tab === 'plinko' && <div style={S.muted}>pays by bin table, up to 16x on 16 rows</div>}
           <div style={S.row}>
@@ -588,8 +640,9 @@ function safeParseEther(v: string): bigint | null {
   }
 }
 
-// Write-through to the persistent bet log. Fire-and-forget: the bet is
-// already on-chain; /api/bets verifies it against the chain before storing.
+// Write-through to the persistent bet log — settled bets only (a bet is
+// appended to history only when it has a result). Fire-and-forget: the bet
+// is already on-chain; /api/bets verifies it before storing.
 function persistBet(bet: Bet) {
   fetch('/api/bets', {
     method: 'POST',

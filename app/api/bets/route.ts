@@ -41,19 +41,22 @@ export async function GET(req: Request) {
   const player = searchParams.get('player') || undefined;
   const game = searchParams.get('game') || undefined;
   const limit = Math.min(Math.max(Number(searchParams.get('limit') || 50), 1), 200);
+  // History shows only settled bets: an escrowed (placed, unresolved) bet
+  // is appended only once it has a result (won/lost).
+  const settled = (b: Bet) => b.status === 'won' || b.status === 'lost';
   if (storeEnabled()) {
     try {
       // First read after deploy: one chain scan populates the store, then
       // every later read is a stable DB query.
       await ensureBackfilled();
-      return NextResponse.json(await listBets(player, game, limit));
+      return NextResponse.json((await listBets(player, game, limit)).filter(settled));
     } catch (e: any) {
       console.error('[bets] store read failed, falling back to scan', e?.message || e);
     }
   }
   try {
     const out = await loadAllBets(player, game);
-    return NextResponse.json(out.slice(0, limit));
+    return NextResponse.json(out.filter(settled).slice(0, limit));
   } catch (e: any) {
     return NextResponse.json({ error: String(e.message || e) }, { status: 500 });
   }

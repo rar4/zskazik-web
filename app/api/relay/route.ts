@@ -175,7 +175,7 @@ export async function POST(req: Request) {
         });
       }
     }
-    return NextResponse.json({ hash, gameBetId, resolveHash, result });
+    return NextResponse.json({ hash, gameBetId, resolveHash, result, blockNumber: Number(receipt.blockNumber) });
   } catch (e: any) {
     return NextResponse.json({ error: humanizeError(e) }, { status: 500 });
   }
