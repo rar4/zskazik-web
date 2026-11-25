@@ -19,7 +19,7 @@ import BetAnimation, { type BetAnimationState } from './bet-animation';
 const T = (process.env.NEXT_PUBLIC_TOKEN || '0x79d782ffb87a643b9c5369f54f0c1fca02f40a89') as `0x${string}`;
 const TR = (process.env.NEXT_PUBLIC_TREASURY || '0xa84a9505753e0be52486e181bd9dde77d261ad56') as `0x${string}`;
 const FL = (process.env.NEXT_PUBLIC_COINFLIP || '0xAF7fDDa566905860D6BF3AdB4cd73Dc771Fab366') as `0x${string}`;
-const DI = (process.env.NEXT_PUBLIC_DICE || '0xDcCBA84D53BF3daa275f57cA7e81b202892EfC14') as `0x${string}`;
+const DI = (process.env.NEXT_PUBLIC_DICE || '0xfC1dB725d0dEd61618E76152610c39147B42eff7') as `0x${string}`;
 const PL = (process.env.NEXT_PUBLIC_PLINKO || '0xdDe34251ad0E1EeD50602680FACdA3e4C66E7f08') as `0x${string}`;
 const FW = (process.env.NEXT_PUBLIC_FORWARDER || '0x0FA6F0693cd56D6dE6DD0297C75CCf41FafCbda7') as `0x${string}`;
 // Fallbacks = the deployed Base Sepolia addresses (broadcast/*/84532 in the
@@ -116,7 +116,7 @@ export default function Casino() {
   const insufficientBalance = wagerValid && balanceData !== undefined && (balanceData as bigint) < wagerWei!;
   const needApprove = wagerValid && BigInt(allowance || '0') < wagerWei!;
 
-  // Dice roll-over target (5-95). Kept as text so the field can be emptied
+  // Dice roll-over target (1-99). Kept as text so the field can be emptied
   // and edited; leading zeros are stripped on input ("05" -> "5",
   // "050" -> "50") so they never render. targetNum is the parsed value
   // used for the bet and the payout line.
@@ -340,24 +340,29 @@ export default function Casino() {
     }
     setMsg('');
     setPlacing(true);
-    // Fresh preflight (never trust the cached react-query values): read
-    // allowance / balance / session straight from the chain. A stale
-    // cached allowance is what sent a 3200 ZSK bet with only 998 approved
-    // to the forwarder, where the inner escrow reverted and surfaced as
-    // the opaque MetaTransactionFailed selector 0x7e256957.
+    // Fast path: the allowance/balance/session queries refetch every 6s,
+    // so for an already-registered player click-to-animation is immediate
+    // and the relay's own preflight simulation is the safety net (a stale
+    // cache that overstates allowance just gets a named relay error, not
+    // a stuck framer). The full fresh read below runs ONLY when the cache
+    // says registration is needed — that is the path that once sent a
+    // 3200 ZSK bet with only 998 approved to the forwarder.
+    const cachedRegistered = sessionActive && !needApprove;
     let freshAllowance = BigInt(allowance || '0');
     let freshBalance: bigint | null = null;
     let freshSession = sessionActive;
-    try {
-      const [allow, bal, sess] = await Promise.all([
-        publicClient!.readContract({ address: T, abi: tokenAbi, functionName: 'allowance', args: [address!, TR] } as any),
-        publicClient!.readContract({ address: T, abi: tokenAbi, functionName: 'balanceOf', args: [address!] } as any),
-        publicClient!.readContract({ address: FW, abi: forwarderAbi, functionName: 'isSessionActive', args: [address!] } as any),
-      ]);
-      freshAllowance = allow as bigint;
-      freshBalance = bal as bigint;
-      freshSession = sess === true;
-    } catch {}
+    if (!cachedRegistered) {
+      try {
+        const [allow, bal, sess] = await Promise.all([
+          publicClient!.readContract({ address: T, abi: tokenAbi, functionName: 'allowance', args: [address!, TR] } as any),
+          publicClient!.readContract({ address: T, abi: tokenAbi, functionName: 'balanceOf', args: [address!] } as any),
+          publicClient!.readContract({ address: FW, abi: forwarderAbi, functionName: 'isSessionActive', args: [address!] } as any),
+        ]);
+        freshAllowance = allow as bigint;
+        freshBalance = bal as bigint;
+        freshSession = sess === true;
+      } catch {}
+    }
     if (freshBalance !== null && freshBalance < wagerWei) {
       setPlacing(false);
       setMsg('insufficient ZSK balance for this wager');
@@ -395,23 +400,27 @@ export default function Casino() {
         const fn = tab === 'flip' ? 'flip' : tab === 'dice' ? 'roll' : 'drop';
         const args = tab === 'flip' ? [choice, wagerWei] : tab === 'dice' ? [targetNum, wagerWei] : [rows, wagerWei];
         const callData = encodeFunctionData({ abi: abi as any, functionName: fn, args: args as any });
-        // Simulate the bet as the user before signing: catches multiplier /
-        // limits / allowance reverts with the real reason, instead of
-        // submitting a doomed meta-tx that only shows selector 0x7e256957.
+        // Simulate + nonce read in parallel (was sequential): the nonce
+        // fetch no longer waits behind the simulation round trip.
         // Raw eth_call (not client.call): viem's CallExecutionError drops
-        // the revert data, while the RPC error carries it in `data` —
-        // that's the only way to name the actual cause.
-        try {
-          await (publicClient as any).request({
-            method: 'eth_call',
-            params: [{ from: address, to: targetAddr, data: callData }, 'latest'],
-          });
-        } catch (simErr: any) {
-          throw new Error(humanizeError(simErr));
-        }
-        const nonce = (await publicClient!.readContract({
-          address: FW, abi: forwarderAbi, functionName: 'nonces', args: [address],
-        } as any)) as bigint;
+        // the revert data, while the RPC error carries it in `data` — that's
+        // the only way to name the actual cause.
+        const [, nonce] = await Promise.all([
+          (async () => {
+            try {
+              await (publicClient as any).request({
+                method: 'eth_call',
+                params: [{ from: address, to: targetAddr, data: callData }, 'latest'],
+              });
+            } catch (simErr: any) {
+              throw new Error(humanizeError(simErr));
+            }
+            return null as unknown as bigint;
+          })(),
+          publicClient!.readContract({
+            address: FW, abi: forwarderAbi, functionName: 'nonces', args: [address],
+          } as any) as Promise<bigint>,
+        ]);
         const digest = metaDigest(address, targetAddr, callData, nonce);
         const signature = await session.signMessage({ message: { raw: digest } });
         setMsg('placing (1-click, no popup)…');
@@ -421,7 +430,14 @@ export default function Casino() {
           body: JSON.stringify({ user: address, target: targetAddr, callData, signature }),
         });
         const j = await res.json();
-        if (!res.ok) throw new Error(j.error || 'relay failed');
+        if (!res.ok) {
+          // Relay preflight reverts are deterministic (allowance, limits,
+          // session): tag them so the catch below does NOT fall through
+          // to the wallet popup and burn a confirmation on a doomed bet.
+          const err: any = new Error(j.error || 'relay failed');
+          err.code = j.code;
+          throw err;
+        }
         if (j.result) {
           setAnimation((a) => (a ? { ...a, result: j.result } : a));
           // Append to history now that it has a result — instantly, without
@@ -446,7 +462,7 @@ export default function Casino() {
         // Deterministic failures (allowance, limits, multiplier) fail the
         // direct wallet path identically — don't burn a popup on it.
         const reason = humanizeError(e);
-        if (/allowance|balance|exceeds|belowmin|paused|insufficient/i.test(reason)) {
+        if (e.code === 'PREFLIGHT_REVERT' || /allowance|balance|exceeds|belowmin|paused|insufficient/i.test(reason)) {
           setAnimation(null);
           setMsg('1-click failed: ' + reason);
           setPending(null); setPlacing(false); load();
@@ -566,7 +582,7 @@ export default function Casino() {
               <button style={S.tab(choice)} onClick={() => setChoice(!choice)}>{choice ? 'heads' : 'tails'}</button>
             )}
             {tab === 'dice' && (
-              <input style={S.input} type="number" min={5} max={95} value={target} onChange={(e) => setTarget(e.target.value.replace(/^0+(?=\d)/, ''))} title="roll-over target" />
+              <input style={S.input} type="number" min={1} max={99} value={target} onChange={(e) => setTarget(e.target.value.replace(/^0+(?=\d)/, ''))} title="roll-over target" />
             )}
             {tab === 'plinko' && (
               <select value={rows} onChange={(e) => setRows(Number(e.target.value))} style={S.input as any}>
