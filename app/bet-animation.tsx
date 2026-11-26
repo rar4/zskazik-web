@@ -86,6 +86,10 @@ export default function BetAnimation({ animation, onClose }: { animation: BetAni
         @keyframes zsk-confetti-fall { 0% { transform: translateY(-18px) rotate(0deg); opacity: 1; } 100% { transform: translateY(170px) rotate(540deg); opacity: 0; } }
         @keyframes zsk-reveal { from { transform: scale(.9) translateY(10px); opacity: 0; } to { transform: scale(1) translateY(0); opacity: 1; } }
         @keyframes zsk-glow { 0%,100% { filter: drop-shadow(0 0 12px rgba(108,92,231,.55)); } 50% { filter: drop-shadow(0 0 26px rgba(108,92,231,.9)); } }
+        @keyframes zsk-load-shimmer { 0% { transform: translateX(-110%); } 100% { transform: translateX(280%); } }
+        @keyframes zsk-load-ring { 0% { transform: scale(.55); opacity: .85; } 100% { transform: scale(1.9); opacity: 0; } }
+        @keyframes zsk-orb-float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+        @keyframes zsk-load-fade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
       `}</style>
 
       {result && won && (
@@ -134,6 +138,30 @@ export default function BetAnimation({ animation, onClose }: { animation: BetAni
         <div style={{ opacity: 0.78, minHeight: 22 }}>
           {result ? resultLine(animation, result) : animation.game === 'plinko' ? 'Anticipation — the ball drops for real once the chain result lands' : 'Waiting for on-chain result…'}
         </div>
+
+        {animation.game === 'plinko' && !rawResult && (
+          <div aria-live="polite" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, marginTop: 10, animation: 'zsk-load-fade .4s ease-out' }}>
+            <div style={{ position: 'relative', width: 64, height: 64, display: 'flex', alignItems: 'center', justifyContent: 'center' }} aria-hidden="true">
+              {[0, 1].map((i) => (
+                <span key={i} style={{ position: 'absolute', inset: 0, borderRadius: '50%', border: '2px solid rgba(108,92,231,.75)', animation: `zsk-load-ring 1.6s ease-out ${i * 0.8}s infinite` }} />
+              ))}
+              <span style={{ position: 'relative', width: 40, height: 40, borderRadius: '50%', background: 'radial-gradient(circle at 35% 30%, #ffffff, #6c5ce7 55%, #2f2470)', boxShadow: '0 0 0 5px rgba(108,92,231,.22), 0 0 26px rgba(108,92,231,.85)', animation: 'zsk-orb-float 1.4s ease-in-out infinite, zsk-ball-pulse 1.6s ease-in-out infinite' }} />
+            </div>
+            <div style={{ width: 'min(360px, 82%)', height: 8, borderRadius: 999, background: 'rgba(255,255,255,.10)', overflow: 'hidden' }} role="progressbar" aria-label="Placing bet">
+              <div style={{ width: '38%', height: '100%', borderRadius: 999, background: 'linear-gradient(90deg, rgba(108,92,231,.25), #6c5ce7, rgba(108,92,231,.25))', animation: 'zsk-load-shimmer 1.3s ease-in-out infinite' }} />
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 700, opacity: 0.92, minHeight: 20 }}>
+              {['Placing your bet on Arbitrum Sepolia', 'Waiting for the block to land', 'Resolving the drop'][Math.floor(tick / 11) % 3]}{'.'.repeat((tick % 3) + 1)}
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }} aria-hidden="true">
+              {['Placing', 'Mining', 'Resolving'].map((s, i) => (
+                <span key={s} style={{ fontSize: 11, letterSpacing: 1.5, textTransform: 'uppercase', fontWeight: 800, padding: '5px 10px', borderRadius: 999, border: '1px solid rgba(255,255,255,.16)', background: 'rgba(255,255,255,.06)', opacity: 0.55 + 0.45 * Math.abs(Math.sin(tick / 9 + i)), transition: 'opacity .3s' }}>
+                  {s}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div style={{ minHeight: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 8 }}>
           {animation.game === 'flip' && <CoinAnimation animation={animation} result={result} />}
@@ -383,6 +411,9 @@ function PlinkoAnimation({ animation, result, onDone }: { animation: BetAnimatio
     let spin = 0;
     let audio: AudioContext | null = null;
     const trail: { x: number; y: number }[] = [];
+    // Anticipation sparkles: cosmetic particles that fall during the wait
+    // for the chain result. Seeded randomness is fine here (not the path).
+    const sparkles: { x: number; y: number; vy: number; vx: number; r: number; a: number }[] = [];
     const tick = () => {
       try {
         audio = audio ?? new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -591,6 +622,41 @@ function PlinkoAnimation({ animation, result, onDone }: { animation: BetAnimatio
       ctx.arc(bx + Math.cos(spin) * ballR * 0.55, by + Math.sin(spin) * ballR * 0.55, ballR * 0.28, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(255,255,255,.85)';
       ctx.fill();
+      // Anticipation dressing, only while waiting for the chain result:
+      // expanding rings around the launcher ball plus falling sparkles.
+      // Purely cosmetic — the ball stays in the launcher until the real
+      // on-chain path arrives, so this cannot imply a trajectory.
+      if (!positions) {
+        for (let i = 0; i < 3; i++) {
+          const phase = ((now / 1400) + i / 3) % 1;
+          ctx.beginPath();
+          ctx.arc(bx, by, ballR + phase * 34, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(108,92,231,${(1 - phase) * 0.5})`;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+        if (sparkles.length < 36 && Math.random() < 0.35) {
+          sparkles.push({
+            x: 30 + Math.random() * (W - 60),
+            y: -6,
+            vy: 0.6 + Math.random() * 1.4,
+            vx: (Math.random() - 0.5) * 0.5,
+            r: 1 + Math.random() * 2.2,
+            a: 0.35 + Math.random() * 0.5,
+          });
+        }
+        for (let i = sparkles.length - 1; i >= 0; i--) {
+          const s = sparkles[i];
+          s.x += s.vx; s.y += s.vy;
+          if (s.y > H) { sparkles.splice(i, 1); continue; }
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(190,200,255,${s.a})`;
+          ctx.fill();
+        }
+      } else {
+        sparkles.length = 0;
+      }
       if (!finished) raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
