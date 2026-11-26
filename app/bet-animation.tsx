@@ -34,8 +34,23 @@ export default function BetAnimation({ animation, onClose }: { animation: BetAni
   // actually landed (onDone), so the reveal is synced to the drop —
   // not to the moment the chain result arrives.
   const [plinkoDone, setPlinkoDone] = useState(false);
+  // Plinko loading overlay: a separate full-screen screen shown between
+  // click and the ball drop. It fades out once the chain result has
+  // landed, and only then is the result handed to the board so the ball
+  // starts falling as the screen disappears.
+  const [overlayPhase, setOverlayPhase] = useState<'loading' | 'fading' | 'gone'>('loading');
+  const overlayPhaseRef = useRef(overlayPhase);
+  overlayPhaseRef.current = overlayPhase;
 
-  useEffect(() => { setPlinkoDone(false); }, [animation]);
+  useEffect(() => { setPlinkoDone(false); setOverlayPhase('loading'); }, [animation]);
+
+  const rawResultEarly = animation.result ?? null;
+  useEffect(() => {
+    if (animation.game !== 'plinko' || !rawResultEarly || overlayPhaseRef.current !== 'loading') return;
+    setOverlayPhase('fading');
+    const t = setTimeout(() => setOverlayPhase('gone'), 450);
+    return () => clearTimeout(t);
+  }, [rawResultEarly, animation.game]);
 
   useEffect(() => {
     const t = setTimeout(() => setReady(true), WAIT_MS);
@@ -139,34 +154,10 @@ export default function BetAnimation({ animation, onClose }: { animation: BetAni
           {result ? resultLine(animation, result) : animation.game === 'plinko' ? 'Anticipation — the ball drops for real once the chain result lands' : 'Waiting for on-chain result…'}
         </div>
 
-        {animation.game === 'plinko' && !rawResult && (
-          <div aria-live="polite" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, marginTop: 10, animation: 'zsk-load-fade .4s ease-out' }}>
-            <div style={{ position: 'relative', width: 64, height: 64, display: 'flex', alignItems: 'center', justifyContent: 'center' }} aria-hidden="true">
-              {[0, 1].map((i) => (
-                <span key={i} style={{ position: 'absolute', inset: 0, borderRadius: '50%', border: '2px solid rgba(108,92,231,.75)', animation: `zsk-load-ring 1.6s ease-out ${i * 0.8}s infinite` }} />
-              ))}
-              <span style={{ position: 'relative', width: 40, height: 40, borderRadius: '50%', background: 'radial-gradient(circle at 35% 30%, #ffffff, #6c5ce7 55%, #2f2470)', boxShadow: '0 0 0 5px rgba(108,92,231,.22), 0 0 26px rgba(108,92,231,.85)', animation: 'zsk-orb-float 1.4s ease-in-out infinite, zsk-ball-pulse 1.6s ease-in-out infinite' }} />
-            </div>
-            <div style={{ width: 'min(360px, 82%)', height: 8, borderRadius: 999, background: 'rgba(255,255,255,.10)', overflow: 'hidden' }} role="progressbar" aria-label="Placing bet">
-              <div style={{ width: '38%', height: '100%', borderRadius: 999, background: 'linear-gradient(90deg, rgba(108,92,231,.25), #6c5ce7, rgba(108,92,231,.25))', animation: 'zsk-load-shimmer 1.3s ease-in-out infinite' }} />
-            </div>
-            <div style={{ fontSize: 14, fontWeight: 700, opacity: 0.92, minHeight: 20 }}>
-              {['Placing your bet on Arbitrum Sepolia', 'Waiting for the block to land', 'Resolving the drop'][Math.floor(tick / 11) % 3]}{'.'.repeat((tick % 3) + 1)}
-            </div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }} aria-hidden="true">
-              {['Placing', 'Mining', 'Resolving'].map((s, i) => (
-                <span key={s} style={{ fontSize: 11, letterSpacing: 1.5, textTransform: 'uppercase', fontWeight: 800, padding: '5px 10px', borderRadius: 999, border: '1px solid rgba(255,255,255,.16)', background: 'rgba(255,255,255,.06)', opacity: 0.55 + 0.45 * Math.abs(Math.sin(tick / 9 + i)), transition: 'opacity .3s' }}>
-                  {s}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-
         <div style={{ minHeight: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 8 }}>
           {animation.game === 'flip' && <CoinAnimation animation={animation} result={result} />}
           {animation.game === 'dice' && <DiceAnimation animation={animation} result={result} tick={tick} />}
-          {animation.game === 'plinko' && <PlinkoAnimation animation={animation} result={rawResult} onDone={() => setPlinkoDone(true)} />}
+          {animation.game === 'plinko' && <PlinkoAnimation animation={animation} result={overlayPhase === 'gone' ? rawResult : null} onDone={() => setPlinkoDone(true)} />}
         </div>
 
         <div style={{ display: 'flex', justifyContent: 'center', gap: 12, flexWrap: 'wrap', marginTop: 14 }}>
@@ -188,6 +179,61 @@ export default function BetAnimation({ animation, onClose }: { animation: BetAni
           )}
         </div>
       </div>
+
+      {animation.game === 'plinko' && overlayPhase !== 'gone' && (
+        <div
+          role="status"
+          aria-live="polite"
+          aria-label="Plinko loading"
+          style={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 1200,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 16,
+            padding: 24,
+            textAlign: 'center',
+            color: '#f4f6ff',
+            background: 'radial-gradient(circle at 50% 22%, rgba(108,92,231,.42), transparent 42%), linear-gradient(180deg, rgba(7,9,20,.99), rgba(11,14,23,.99))',
+            opacity: overlayPhase === 'fading' ? 0 : 1,
+            transition: 'opacity .45s ease-out',
+            pointerEvents: overlayPhase === 'fading' ? 'none' : 'auto',
+            animation: 'zsk-load-fade .4s ease-out',
+          }}
+        >
+          <div style={{ letterSpacing: 4, fontWeight: 800, opacity: 0.72, textTransform: 'uppercase', fontSize: 13 }}>
+            ZSKazik
+          </div>
+          <h1 style={{ margin: 0, fontSize: 'clamp(42px, 10vw, 84px)', lineHeight: 1, letterSpacing: -1, fontWeight: 1000 }}>
+            PLINKO
+          </h1>
+          <div style={{ position: 'relative', width: 96, height: 96, display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 8 }} aria-hidden="true">
+            {[0, 1, 2].map((i) => (
+              <span key={i} style={{ position: 'absolute', inset: 0, borderRadius: '50%', border: '2px solid rgba(108,92,231,.75)', animation: `zsk-load-ring 1.6s ease-out ${i * 0.53}s infinite` }} />
+            ))}
+            <span style={{ position: 'relative', width: 58, height: 58, borderRadius: '50%', background: 'radial-gradient(circle at 35% 30%, #ffffff, #6c5ce7 55%, #2f2470)', boxShadow: '0 0 0 6px rgba(108,92,231,.22), 0 0 34px rgba(108,92,231,.9)', animation: 'zsk-orb-float 1.4s ease-in-out infinite, zsk-ball-pulse 1.6s ease-in-out infinite' }} />
+          </div>
+          <div style={{ width: 'min(380px, 84%)', height: 10, borderRadius: 999, background: 'rgba(255,255,255,.10)', overflow: 'hidden' }} role="progressbar" aria-label="Placing bet">
+            <div style={{ width: '38%', height: '100%', borderRadius: 999, background: 'linear-gradient(90deg, rgba(108,92,231,.25), #6c5ce7, rgba(108,92,231,.25))', animation: 'zsk-load-shimmer 1.3s ease-in-out infinite' }} />
+          </div>
+          <div style={{ fontSize: 16, fontWeight: 700, minHeight: 22 }}>
+            {['Placing your bet on Arbitrum Sepolia', 'Waiting for the block to land', 'Resolving the drop'][Math.floor(tick / 11) % 3]}{'.'.repeat((tick % 3) + 1)}
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }} aria-hidden="true">
+            {['Placing', 'Mining', 'Resolving'].map((s, i) => (
+              <span key={s} style={{ fontSize: 11, letterSpacing: 1.5, textTransform: 'uppercase', fontWeight: 800, padding: '6px 12px', borderRadius: 999, border: '1px solid rgba(255,255,255,.16)', background: 'rgba(255,255,255,.06)', opacity: 0.55 + 0.45 * Math.abs(Math.sin(tick / 9 + i)), transition: 'opacity .3s' }}>
+                {s}
+              </span>
+            ))}
+          </div>
+          <div style={{ fontSize: 13, opacity: 0.75 }}>
+            Wager {fmt(animation.wager)} ZSK · {animation.rows} rows
+          </div>
+        </div>
+      )}
     </div>
   );
 }
