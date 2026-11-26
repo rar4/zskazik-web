@@ -312,14 +312,6 @@ export default function Casino() {
     }
   };
 
-  const waitUntilBlock = async (target: bigint) => {
-    // Poll every 100ms (was 800ms) against the known place block — the
-    // coarse poll added up to 800ms of dead air before resolve could go.
-    while ((await publicClient!.getBlockNumber()) < target) {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  };
-
   const play = async () => {
     if (!wallet || placing || pending) return;
     if (!wagerValid || !wagerWei) {
@@ -472,7 +464,9 @@ export default function Casino() {
         const placed = parsePlaced(rc, flipAbi, 'FlipPlaced');
         gameId = placed.gameBetId;
         setPending(gameId); setMsg('flipped — resolving…');
-        await waitUntilBlock(BigInt(placed.blockNumber) + 2n);
+        // No block wait: place receipt means place is mined, so this
+        // resolve broadcast lands in a later block and satisfies
+        // _requireResolvable without burning 2 blocks of dead air.
         const rh = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
         const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh, pollingInterval: 200 });
         const res = parseResolved(rrc, flipAbi, 'FlipResolved');
@@ -488,7 +482,7 @@ export default function Casino() {
         const placed = parsePlaced(rc, diceAbi, 'RollPlaced');
         gameId = placed.gameBetId;
         setPending(gameId); setMsg('rolled — resolving…');
-        await waitUntilBlock(BigInt(placed.blockNumber) + 2n);
+        // No block wait (see flip path): resolve lands in a later block.
         const rh = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
         const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh, pollingInterval: 200 });
         const res = parseResolved(rrc, diceAbi, 'RollResolved');
@@ -504,7 +498,7 @@ export default function Casino() {
         const placed = parsePlaced(rc, plinkoAbi, 'DropPlaced');
         gameId = placed.gameBetId;
         setPending(gameId); setMsg('dropped — resolving…');
-        await waitUntilBlock(BigInt(placed.blockNumber) + 2n);
+        // No block wait (see flip path): resolve lands in a later block.
         const rh = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
         const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh, pollingInterval: 200 });
         const res = parseResolved(rrc, plinkoAbi, 'DropResolved');
@@ -620,7 +614,7 @@ export default function Casino() {
           {insufficientBalance && <div style={{ color: '#ff9', marginTop: 6 }}>insufficient ZSK balance for this wager</div>}
           {(approving || pending) && msg && <div style={{ marginTop: 8 }}><Spinner />{msg}</div>}
           {msg && !approving && !pending && <div style={{ marginTop: 8 }}>{msg}</div>}
-          {pending && <div style={S.muted}>bet {pending} — wait 2 blocks, auto-resolving…</div>}
+          {pending && <div style={S.muted}>bet {pending} — auto-resolving…</div>}
         </div>
       )}
       <div style={S.card}>

@@ -53,15 +53,6 @@ function relayer() {
   return createWalletClient({ account, chain: baseSepolia, transport: http(RPC) });
 }
 
-async function waitUntilBlock(target: bigint) {
-  // Poll every 100ms (was 250ms) against a target we already know from the
-  // place receipt — no initial getBlockNumber round trip, and the coarse
-  // poll no longer adds up to 250ms of dead air before resolve can go.
-  while ((await client.getBlockNumber()) < target) {
-    await new Promise((r) => setTimeout(r, 100));
-  }
-}
-
 export async function POST(req: Request) {
   const t0 = Date.now();
   const timings: Record<string, number> = {};
@@ -132,10 +123,12 @@ export async function POST(req: Request) {
       details?: { roll?: number; bin?: number; multBps?: string; path?: number[]; word?: string };
     } | null = null;
     if (gameBetId) {
-      // One block is enough: resolve() only requires a LATER block than
-      // placement, and the resolve tx lands after this wait regardless.
-      // Target is the known place block + 1, not a fresh getBlockNumber.
-      await waitUntilBlock(receipt.blockNumber + 1n);
+      // No block wait before resolve. The place receipt only exists after
+      // the place tx is mined, so a resolve broadcast now cannot land in
+      // the place block — the sequencer will include it in a later block,
+      // which satisfies _requireResolvable (block.number > placeBlock)
+      // without burning a full 2s block waiting for place+1 to mine first.
+      // That wait cost one whole block per bet.
       mark('resolveReady');
       resolveHash = await wallet.writeContract({
         address: target,

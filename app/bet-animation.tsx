@@ -365,11 +365,13 @@ function PlinkoAnimation({ animation, result, onDone }: { animation: BetAnimatio
       const slow = mult >= 20000 ? 1.6 : 1;
       for (let i = 0; i < rows; i++) {
         const jitter = Number((wordBig >> BigInt(16 + (i % 8) * 3)) & 7n) - 3.5; // -3.5..3.5
-        let d = 150 - i * 3 + jitter * 9;
+        // Slower fall: ~255ms base per peg (was ~150ms), still accelerating
+        // slightly down the board. Total ~2.7s at 8 rows, ~4.2s at 16 rows.
+        let d = 255 - i * 5 + jitter * 15;
         if (i >= rows - 2) d *= slow;
-        segDur.push(Math.max(65, Math.min(280, d)));
+        segDur.push(Math.max(110, Math.min(450, d)));
       }
-      segDur.push(520); // settle into bucket (with bounce)
+      segDur.push(750); // settle into bucket (with bounce)
     }
     const total = segDur.reduce((a, b) => a + b, 0);
     let raf = 0;
