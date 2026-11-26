@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { createWalletClient, http, parseAbi, parseEventLogs, encodeFunctionData, type Hex } from 'viem';
+import { createWalletClient, http, parseAbi, parseEventLogs, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { arbitrumSepolia } from 'viem/chains';
 import { ADDR, client } from '@/lib/chain';
@@ -66,24 +66,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'target not a game contract' }, { status: 400 });
     }
     const wallet = relayer();
-    // Preflight: simulate the meta-tx before paying gas for it. Without
-    // this, a doomed bet (e.g. allowance < wager) reverts on-chain and the
-    // user only sees the forwarder's wrapper selector 0x7e256957. The
-    // simulation covers isSessionActive too (inactive session = revert),
-    // so the separate read was pure latency — one RPC off the path.
-    try {
-      const simData = encodeFunctionData({
-        abi: forwarderAbi, functionName: 'executeMetaTransaction', args: [user, target, callData, signature],
-      } as any);
-      // Raw eth_call: client.call drops revert data in CallExecutionError.
-      await (client as any).request({
-        method: 'eth_call',
-        params: [{ from: wallet.account.address, to: ADDR.forwarder, data: simData }, 'latest'],
-      });
-    } catch (simErr: any) {
-      return NextResponse.json({ error: humanizeError(simErr), code: 'PREFLIGHT_REVERT' }, { status: 400 });
-    }
-    mark('simulated');
+    // No preflight simulation: broadcast optimistically for speed (~166ms
+    // saved per bet). A doomed bet (e.g. allowance < wager, inactive
+    // session) reverts on-chain instead, costing the relayer one cheap
+    // Arbitrum tx, and returns TX_REVERTED below — the client treats it
+    // as deterministic and does not fall back to a wallet popup, so the
+    // user still gets an error without burning a confirmation.
     const hash = await wallet.writeContract({
       address: ADDR.forwarder,
       abi: forwarderAbi as any,
@@ -92,10 +80,10 @@ export async function POST(req: Request) {
       gas: GAS_PLACE,
     } as any);
     mark('placeBroadcast');
-    const receipt = await client.waitForTransactionReceipt({ hash, pollingInterval: 200 });
+    const receipt = await client.waitForTransactionReceipt({ hash, pollingInterval: 100 });
     mark('placeMined');
     if (receipt.status !== 'success') {
-      return NextResponse.json({ error: 'meta-tx reverted', hash }, { status: 500 });
+      return NextResponse.json({ error: 'meta-tx reverted on-chain', hash, code: 'TX_REVERTED' }, { status: 500 });
     }
     const logs = parseEventLogs({ abi: gameAbi, logs: receipt.logs }) as any[];
     const placed = logs.find((l) => ['FlipPlaced', 'RollPlaced', 'DropPlaced'].includes(l.eventName));
@@ -137,7 +125,7 @@ export async function POST(req: Request) {
         gas: GAS_RESOLVE,
       } as any);
       mark('resolveBroadcast');
-      const resolveReceipt = await client.waitForTransactionReceipt({ hash: resolveHash as Hex, pollingInterval: 200 });
+      const resolveReceipt = await client.waitForTransactionReceipt({ hash: resolveHash as Hex, pollingInterval: 100 });
       mark('resolveMined');
       const resolvedLogs = parseEventLogs({ abi: gameAbi, logs: resolveReceipt.logs }) as any[];
       const resolved = resolvedLogs.find((l) => RESOLVED_EVENTS.includes(l.eventName));

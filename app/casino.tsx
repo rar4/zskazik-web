@@ -174,7 +174,7 @@ export default function Casino() {
         address: FW, abi: forwarderAbi, functionName: 'setSigner',
         args: [session.address, expiry],
       } as any);
-      await publicClient!.waitForTransactionReceipt({ hash, pollingInterval: 200 });
+      await publicClient!.waitForTransactionReceipt({ hash, pollingInterval: 100 });
       await refetchSession();
       return true;
     } catch (e: any) {
@@ -187,6 +187,38 @@ export default function Casino() {
 
   const publicClientRef = useRef(publicClient);
   publicClientRef.current = publicClient;
+
+  // Forwarder nonce cache: the nonce is monotonic per user and only
+  // increments on a successful meta-tx, so caching it in localStorage
+  // removes the readContract round trip from the click path. Prefetched
+  // on connect, incremented locally after each successful relay bet, and
+  // refreshed once on an InvalidSignature (stale cache) retry in play().
+  const nonceKey = address ? `zskazik-nonce-${address.toLowerCase()}` : null;
+  const getCachedNonce = (): bigint | null => {
+    try {
+      const v = nonceKey ? localStorage.getItem(nonceKey) : null;
+      return v ? BigInt(v) : null;
+    } catch { return null; }
+  };
+  const setCachedNonce = (n: bigint) => {
+    try { if (nonceKey) localStorage.setItem(nonceKey, n.toString()); } catch {}
+  };
+  const refreshNonce = async (): Promise<bigint> => {
+    const n = (await publicClientRef.current!.readContract({
+      address: FW, abi: forwarderAbi, functionName: 'nonces', args: [address],
+    } as any)) as bigint;
+    setCachedNonce(n);
+    return n;
+  };
+  // Prefetch the nonce once the wallet connects so click-to-bet has no
+  // nonce round trip. Fire-and-forget: a failure just means play() reads
+  // it fresh as before.
+  useEffect(() => {
+    if (address && publicClientRef.current) {
+      refreshNonce().catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [address]);
 
   const betsRef = useRef<Bet[]>([]);
   const cacheKey = address ? `zskazik-bets-${address.toLowerCase()}` : null;
@@ -293,7 +325,7 @@ export default function Casino() {
         address: T, abi: tokenAbi, functionName: 'approve',
         args: [TR, amount], gas: GAS_APPROVE,
       } as any);
-      await publicClient!.waitForTransactionReceipt({ hash, pollingInterval: 200 });
+      await publicClient!.waitForTransactionReceipt({ hash, pollingInterval: 100 });
       // Verify the approval actually landed before claiming success —
       // previously this returned true unconditionally after 5 retries, so
       // the next click could send a bet the allowance didn't cover.
@@ -393,31 +425,42 @@ export default function Casino() {
         const fn = tab === 'flip' ? 'flip' : tab === 'dice' ? 'roll' : 'drop';
         const args = tab === 'flip' ? [choice, wagerWei] : tab === 'dice' ? [targetNum, wagerWei] : [rows, wagerWei];
         const callData = encodeFunctionData({ abi: abi as any, functionName: fn, args: args as any });
-        // No client-side eth_call simulation here: the relay runs the same
-        // preflight simulation server-side before paying gas, and a doomed
-        // bet returns PREFLIGHT_REVERT (handled below, no wallet fallback).
-        // Simulating in both places was a duplicated round trip (~200-400ms)
-        // on the click-to-drop path. Only the nonce read is needed locally.
-        const nonce = (await publicClient!.readContract({
-          address: FW, abi: forwarderAbi, functionName: 'nonces', args: [address],
-        } as any)) as bigint;
-        const digest = metaDigest(address, targetAddr, callData, nonce);
-        const signature = await session.signMessage({ message: { raw: digest } });
-        setMsg('placing (1-click, no popup)…');
-        const res = await fetch('/api/relay', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user: address, target: targetAddr, callData, signature }),
-        });
-        const j = await res.json();
-        if (!res.ok) {
-          // Relay preflight reverts are deterministic (allowance, limits,
-          // session): tag them so the catch below does NOT fall through
-          // to the wallet popup and burn a confirmation on a doomed bet.
-          const err: any = new Error(j.error || 'relay failed');
+        // No client-side simulation and no nonce round trip on the hot
+        // path: the relay broadcasts optimistically (no preflight) and a
+        // doomed bet reverts on-chain as TX_REVERTED (handled below, no
+        // wallet fallback). The nonce comes from the prefetch cache; on a
+        // stale-cache InvalidSignature the relay reverts without consuming
+        // the on-chain nonce, so we refresh once and retry.
+        let nonce = getCachedNonce() ?? (await refreshNonce());
+        let j: any = null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const digest = metaDigest(address, targetAddr, callData, nonce);
+          const signature = await session.signMessage({ message: { raw: digest } });
+          setMsg('placing (1-click, no popup)…');
+          const res = await fetch('/api/relay', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user: address, target: targetAddr, callData, signature }),
+          });
+          j = await res.json().catch(() => ({}));
+          if (res.ok) {
+            // Place succeeded on-chain, so the forwarder consumed this nonce.
+            setCachedNonce(nonce + 1n);
+            break;
+          }
+          const errText = String(j.error || '');
+          if (attempt === 0 && /InvalidSignature|signature|nonce/i.test(errText)) {
+            nonce = await refreshNonce();
+            continue;
+          }
+          // Relay reverts are deterministic (allowance, limits, session):
+          // tag them so the catch below does NOT fall through to the
+          // wallet popup and burn a confirmation on a doomed bet.
+          const err: any = new Error(errText || 'relay failed');
           err.code = j.code;
           throw err;
         }
+        if (!j) throw new Error('relay failed');
         if (j.result) {
           setAnimation((a) => (a ? { ...a, result: j.result } : a));
           // Append to history now that it has a result — instantly, without
@@ -442,7 +485,7 @@ export default function Casino() {
         // Deterministic failures (allowance, limits, multiplier) fail the
         // direct wallet path identically — don't burn a popup on it.
         const reason = humanizeError(e);
-        if (e.code === 'PREFLIGHT_REVERT' || /allowance|balance|exceeds|belowmin|paused|insufficient/i.test(reason)) {
+        if (e.code === 'PREFLIGHT_REVERT' || e.code === 'TX_REVERTED' || /allowance|balance|exceeds|belowmin|paused|insufficient/i.test(reason)) {
           setAnimation(null);
           setMsg('1-click failed: ' + reason);
           setPending(null); setPlacing(false); load();
@@ -460,7 +503,7 @@ export default function Casino() {
       let gameId: `0x${string}`;
       if (tab === 'flip') {
         const h = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'flip', args: [choice, w], gas: GAS_PLACE } as any);
-        const rc = await publicClient!.waitForTransactionReceipt({ hash: h, pollingInterval: 200 });
+        const rc = await publicClient!.waitForTransactionReceipt({ hash: h, pollingInterval: 100 });
         const placed = parsePlaced(rc, flipAbi, 'FlipPlaced');
         gameId = placed.gameBetId;
         setPending(gameId); setMsg('flipped — resolving…');
@@ -468,7 +511,7 @@ export default function Casino() {
         // resolve broadcast lands in a later block and satisfies
         // _requireResolvable without burning 2 blocks of dead air.
         const rh = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
-        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh, pollingInterval: 200 });
+        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh, pollingInterval: 100 });
         const res = parseResolved(rrc, flipAbi, 'FlipResolved');
         if (res) {
           appendSettledBet({ game_bet_id: placed.gameBetId, game: 'coinflip', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
@@ -478,13 +521,13 @@ export default function Casino() {
         }
       } else if (tab === 'dice') {
         const h = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'roll', args: [targetNum, w], gas: GAS_PLACE } as any);
-        const rc = await publicClient!.waitForTransactionReceipt({ hash: h, pollingInterval: 200 });
+        const rc = await publicClient!.waitForTransactionReceipt({ hash: h, pollingInterval: 100 });
         const placed = parsePlaced(rc, diceAbi, 'RollPlaced');
         gameId = placed.gameBetId;
         setPending(gameId); setMsg('rolled — resolving…');
         // No block wait (see flip path): resolve lands in a later block.
         const rh = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
-        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh, pollingInterval: 200 });
+        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh, pollingInterval: 100 });
         const res = parseResolved(rrc, diceAbi, 'RollResolved');
         if (res) {
           appendSettledBet({ game_bet_id: placed.gameBetId, game: 'dice', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
@@ -494,13 +537,13 @@ export default function Casino() {
         }
       } else {
         const h = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'drop', args: [rows, w], gas: GAS_PLACE } as any);
-        const rc = await publicClient!.waitForTransactionReceipt({ hash: h, pollingInterval: 200 });
+        const rc = await publicClient!.waitForTransactionReceipt({ hash: h, pollingInterval: 100 });
         const placed = parsePlaced(rc, plinkoAbi, 'DropPlaced');
         gameId = placed.gameBetId;
         setPending(gameId); setMsg('dropped — resolving…');
         // No block wait (see flip path): resolve lands in a later block.
         const rh = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
-        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh, pollingInterval: 200 });
+        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh, pollingInterval: 100 });
         const res = parseResolved(rrc, plinkoAbi, 'DropResolved');
         if (res) {
           // Same bit-path replay as the relayer: recompute the contract's
