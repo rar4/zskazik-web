@@ -28,10 +28,11 @@ export const ADDR_OLD = {
 };
 
 export const client = createPublicClient({
-  // 500ms receipt/block polling: viem's 4s default added seconds of dead
+  // 200ms receipt/block polling: viem's 4s default added seconds of dead
   // air to every place+resolve cycle — the ball waited on the poller,
-  // not on the chain (2s blocks).
-  pollingInterval: 500,
+  // not on the chain (2s blocks). 200ms caps the average detection lag
+  // at ~100ms per wait (3 waits per bet) without hammering the RPC.
+  pollingInterval: 200,
   // Fallback across public Base Sepolia endpoints: single-endpoint scans
   // intermittently return partial/empty log pages (lagging or throttled
   // backends). viem's fallback transport moves to the next URL on error.

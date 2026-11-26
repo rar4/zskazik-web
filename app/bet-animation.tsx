@@ -402,6 +402,59 @@ function PlinkoAnimation({ animation, result, onDone }: { animation: BetAnimatio
       if (x < 2.5 / d1) return n1 * (x -= 2.25 / d1) * x + 0.9375;
       return n1 * (x -= 2.625 / d1) * x + 0.984375;
     };
+    // Static board layer, pre-rendered once per effect (rows fixed) instead
+    // of redrawn every frame: buckets + labels (measureText per bucket) and
+    // ~136 pegs with shadowBlur cost several ms per frame at 60fps and made
+    // the first frames after the modal mounts heavier than needed. Per frame
+    // we now blit this layer and only draw the dynamic bits on top: the win
+    // bucket highlight, hit/swept peg highlights, trail, and the ball.
+    const staticCanvas = document.createElement('canvas');
+    staticCanvas.width = W * dpr;
+    staticCanvas.height = H * dpr;
+    const sctx = staticCanvas.getContext('2d');
+    if (sctx) {
+      sctx.scale(dpr, dpr);
+      for (let i = 0; i < bins; i++) {
+        const x0 = slotCenter(i) - spacing / 2;
+        const x1 = slotCenter(i) + spacing / 2;
+        sctx.beginPath();
+        sctx.roundRect(x0 + 1.5, bucketsTop, spacing - 3, bucketH, 7);
+        sctx.fillStyle = 'rgba(255,255,255,.07)';
+        sctx.fill();
+        sctx.strokeStyle = 'rgba(255,255,255,.14)';
+        sctx.stroke();
+        sctx.beginPath();
+        sctx.moveTo(x0 + 1.5, bucketsTop);
+        sctx.lineTo(x0 + 1.5, bucketsTop - 7);
+        sctx.strokeStyle = 'rgba(255,255,255,.25)';
+        sctx.stroke();
+        sctx.fillStyle = '#fff';
+        sctx.font = `800 ${labelFont}px system-ui, sans-serif`;
+        sctx.textAlign = 'center';
+        sctx.textBaseline = 'middle';
+        const labelY = bucketsTop + bucketH - 10;
+        const label = multLabel(rows, i) || String(i);
+        const labelW = Math.min(spacing - 4, sctx.measureText(label).width + 8);
+        sctx.beginPath();
+        sctx.roundRect((x0 + x1) / 2 - labelW / 2, labelY - labelFont / 2 - 2, labelW, labelFont + 4, 4);
+        sctx.fillStyle = 'rgba(0,0,0,.45)';
+        sctx.fill();
+        sctx.fillStyle = '#fff';
+        sctx.fillText(label, (x0 + x1) / 2, labelY);
+      }
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c <= r; c++) {
+          const { x, y } = pegXY(r, c);
+          sctx.beginPath();
+          sctx.arc(x, y, 3.5, 0, Math.PI * 2);
+          sctx.fillStyle = '#aab6ff';
+          sctx.shadowColor = 'rgba(170,182,255,.7)';
+          sctx.shadowBlur = 6;
+          sctx.fill();
+          sctx.shadowBlur = 0;
+        }
+      }
+    }
     const draw = (now: number) => {
       if (!start) { start = now; lastT = now; }
       const dt = Math.max(1, now - lastT);
@@ -458,54 +511,46 @@ function PlinkoAnimation({ animation, result, onDone }: { animation: BetAnimatio
       // trail/ball after-images that fell into the buckets, so they
       // accumulated over the multiplier labels frame after frame.
       ctx.clearRect(0, 0, W, H);
-      // Buckets (drawn every frame; ball rests inside them).
-      for (let i = 0; i < bins; i++) {
-        const x0 = slotCenter(i) - spacing / 2;
-        const x1 = slotCenter(i) + spacing / 2;
-        const isWin = doneRef.current && i === resultBin; // ref (not state): effect must not rerun to highlight
+      // Blit the pre-rendered static board (buckets, labels, base pegs).
+      if (sctx) ctx.drawImage(staticCanvas, 0, 0, W, H);
+      // Win bucket highlight, drawn over the static layer once settled.
+      if (doneRef.current && resultBin !== undefined) {
+        const x0 = slotCenter(resultBin) - spacing / 2;
         ctx.beginPath();
         ctx.roundRect(x0 + 1.5, bucketsTop, spacing - 3, bucketH, 7);
-        ctx.fillStyle = isWin ? (result?.status === 'won' ? 'rgba(17,122,56,.85)' : 'rgba(139,30,45,.85)') : 'rgba(255,255,255,.07)';
+        ctx.fillStyle = result?.status === 'won' ? 'rgba(17,122,56,.85)' : 'rgba(139,30,45,.85)';
         ctx.fill();
         ctx.strokeStyle = 'rgba(255,255,255,.14)';
         ctx.stroke();
-        // Slot wall above the bucket mouth — the ball visibly enters a slot.
+        const labelY = bucketsTop + bucketH - 10;
+        const label = multLabel(rows, resultBin) || String(resultBin);
+        const labelW = Math.min(spacing - 4, ctx.measureText(label).width + 8);
+        // Opaque pill behind the label so it stays readable on the highlight.
         ctx.beginPath();
-        ctx.moveTo(x0 + 1.5, bucketsTop);
-        ctx.lineTo(x0 + 1.5, bucketsTop - 7);
-        ctx.strokeStyle = 'rgba(255,255,255,.25)';
-        ctx.stroke();
-        ctx.fillStyle = '#fff';
+        ctx.roundRect(slotCenter(resultBin) - labelW / 2, labelY - labelFont / 2 - 2, labelW, labelFont + 4, 4);
+        ctx.fillStyle = 'rgba(0,0,0,.45)';
+        ctx.fill();
         ctx.font = `800 ${labelFont}px system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        // Label sits at the bucket floor, below the resting ball, on a
-        // dark pill so it stays readable on the highlighted win bucket.
-        const labelY = bucketsTop + bucketH - 10;
-        const label = multLabel(rows, i) || String(i);
-        const labelW = Math.min(spacing - 4, ctx.measureText(label).width + 8);
-        ctx.beginPath();
-        ctx.roundRect((x0 + x1) / 2 - labelW / 2, labelY - labelFont / 2 - 2, labelW, labelFont + 4, 4);
-        ctx.fillStyle = 'rgba(0,0,0,.45)';
-        ctx.fill();
         ctx.fillStyle = '#fff';
-        ctx.fillText(label, (x0 + x1) / 2, labelY);
+        ctx.fillText(label, slotCenter(resultBin), labelY);
       }
-      // Pegs. Peg (r, c) is hit iff the ball's rights at step r equal c.
-      // Before the settled path arrives, a glow wave sweeps down the rows
-      // (cosmetic anticipation only — it never implies a trajectory; the
-      // ball is still held in the launcher above the board).
+      // Dynamic peg highlights only: hit pegs along the true path and the
+      // anticipation sweep row before the path arrives. Base pegs are in
+      // the static layer.
       const sweepRow = positions ? -1 : Math.floor(now / 160) % rows;
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c <= r; c++) {
-          const { x, y } = pegXY(r, c);
           const hit = !!positions && curStep > r && c === positions[r];
           const swept = r === sweepRow;
+          if (!hit && !swept) continue;
+          const { x, y } = pegXY(r, c);
           ctx.beginPath();
-          ctx.arc(x, y, hit ? 4.5 : swept ? 4 : 3.5, 0, Math.PI * 2);
-          ctx.fillStyle = hit ? '#dfe6ff' : swept ? '#ffffff' : '#aab6ff';
+          ctx.arc(x, y, hit ? 4.5 : 4, 0, Math.PI * 2);
+          ctx.fillStyle = hit ? '#dfe6ff' : '#ffffff';
           ctx.shadowColor = 'rgba(170,182,255,.7)';
-          ctx.shadowBlur = hit ? 10 : swept ? 14 : 6;
+          ctx.shadowBlur = hit ? 10 : 14;
           ctx.fill();
           ctx.shadowBlur = 0;
         }

@@ -53,12 +53,12 @@ function relayer() {
   return createWalletClient({ account, chain: baseSepolia, transport: http(RPC) });
 }
 
-async function waitBlocks(n: number) {
-  const start = await client.getBlockNumber();
-  // 250ms poll (was 800ms): on 2s blocks the coarse poll added up to
-  // 800ms of pure dead air before resolve could be submitted.
-  while ((await client.getBlockNumber()) < start + BigInt(n)) {
-    await new Promise((r) => setTimeout(r, 250));
+async function waitUntilBlock(target: bigint) {
+  // Poll every 100ms (was 250ms) against a target we already know from the
+  // place receipt — no initial getBlockNumber round trip, and the coarse
+  // poll no longer adds up to 250ms of dead air before resolve can go.
+  while ((await client.getBlockNumber()) < target) {
+    await new Promise((r) => setTimeout(r, 100));
   }
 }
 
@@ -102,7 +102,7 @@ export async function POST(req: Request) {
       gas: GAS_PLACE,
     } as any);
     mark('placeBroadcast');
-    const receipt = await client.waitForTransactionReceipt({ hash });
+    const receipt = await client.waitForTransactionReceipt({ hash, pollingInterval: 200 });
     mark('placeMined');
     if (receipt.status !== 'success') {
       return NextResponse.json({ error: 'meta-tx reverted', hash }, { status: 500 });
@@ -134,8 +134,8 @@ export async function POST(req: Request) {
     if (gameBetId) {
       // One block is enough: resolve() only requires a LATER block than
       // placement, and the resolve tx lands after this wait regardless.
-      // Waiting 2 blocks added ~2s of dead air before the ball could drop.
-      await waitBlocks(1);
+      // Target is the known place block + 1, not a fresh getBlockNumber.
+      await waitUntilBlock(receipt.blockNumber + 1n);
       mark('resolveReady');
       resolveHash = await wallet.writeContract({
         address: target,
@@ -145,7 +145,7 @@ export async function POST(req: Request) {
         gas: GAS_RESOLVE,
       } as any);
       mark('resolveBroadcast');
-      const resolveReceipt = await client.waitForTransactionReceipt({ hash: resolveHash as Hex });
+      const resolveReceipt = await client.waitForTransactionReceipt({ hash: resolveHash as Hex, pollingInterval: 200 });
       mark('resolveMined');
       const resolvedLogs = parseEventLogs({ abi: gameAbi, logs: resolveReceipt.logs }) as any[];
       const resolved = resolvedLogs.find((l) => RESOLVED_EVENTS.includes(l.eventName));

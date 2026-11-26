@@ -174,7 +174,7 @@ export default function Casino() {
         address: FW, abi: forwarderAbi, functionName: 'setSigner',
         args: [session.address, expiry],
       } as any);
-      await publicClient!.waitForTransactionReceipt({ hash });
+      await publicClient!.waitForTransactionReceipt({ hash, pollingInterval: 200 });
       await refetchSession();
       return true;
     } catch (e: any) {
@@ -293,7 +293,7 @@ export default function Casino() {
         address: T, abi: tokenAbi, functionName: 'approve',
         args: [TR, amount], gas: GAS_APPROVE,
       } as any);
-      await publicClient!.waitForTransactionReceipt({ hash });
+      await publicClient!.waitForTransactionReceipt({ hash, pollingInterval: 200 });
       // Verify the approval actually landed before claiming success —
       // previously this returned true unconditionally after 5 retries, so
       // the next click could send a bet the allowance didn't cover.
@@ -312,10 +312,11 @@ export default function Casino() {
     }
   };
 
-  const waitBlocks = async (n: number) => {
-    const start = await publicClient!.getBlockNumber();
-    while ((await publicClient!.getBlockNumber()) < start + BigInt(n)) {
-      await new Promise((r) => setTimeout(r, 800));
+  const waitUntilBlock = async (target: bigint) => {
+    // Poll every 100ms (was 800ms) against the known place block — the
+    // coarse poll added up to 800ms of dead air before resolve could go.
+    while ((await publicClient!.getBlockNumber()) < target) {
+      await new Promise((r) => setTimeout(r, 100));
     }
   };
 
@@ -400,27 +401,14 @@ export default function Casino() {
         const fn = tab === 'flip' ? 'flip' : tab === 'dice' ? 'roll' : 'drop';
         const args = tab === 'flip' ? [choice, wagerWei] : tab === 'dice' ? [targetNum, wagerWei] : [rows, wagerWei];
         const callData = encodeFunctionData({ abi: abi as any, functionName: fn, args: args as any });
-        // Simulate + nonce read in parallel (was sequential): the nonce
-        // fetch no longer waits behind the simulation round trip.
-        // Raw eth_call (not client.call): viem's CallExecutionError drops
-        // the revert data, while the RPC error carries it in `data` — that's
-        // the only way to name the actual cause.
-        const [, nonce] = await Promise.all([
-          (async () => {
-            try {
-              await (publicClient as any).request({
-                method: 'eth_call',
-                params: [{ from: address, to: targetAddr, data: callData }, 'latest'],
-              });
-            } catch (simErr: any) {
-              throw new Error(humanizeError(simErr));
-            }
-            return null as unknown as bigint;
-          })(),
-          publicClient!.readContract({
-            address: FW, abi: forwarderAbi, functionName: 'nonces', args: [address],
-          } as any) as Promise<bigint>,
-        ]);
+        // No client-side eth_call simulation here: the relay runs the same
+        // preflight simulation server-side before paying gas, and a doomed
+        // bet returns PREFLIGHT_REVERT (handled below, no wallet fallback).
+        // Simulating in both places was a duplicated round trip (~200-400ms)
+        // on the click-to-drop path. Only the nonce read is needed locally.
+        const nonce = (await publicClient!.readContract({
+          address: FW, abi: forwarderAbi, functionName: 'nonces', args: [address],
+        } as any)) as bigint;
         const digest = metaDigest(address, targetAddr, callData, nonce);
         const signature = await session.signMessage({ message: { raw: digest } });
         setMsg('placing (1-click, no popup)…');
@@ -480,13 +468,13 @@ export default function Casino() {
       let gameId: `0x${string}`;
       if (tab === 'flip') {
         const h = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'flip', args: [choice, w], gas: GAS_PLACE } as any);
-        const rc = await publicClient!.waitForTransactionReceipt({ hash: h });
+        const rc = await publicClient!.waitForTransactionReceipt({ hash: h, pollingInterval: 200 });
         const placed = parsePlaced(rc, flipAbi, 'FlipPlaced');
         gameId = placed.gameBetId;
         setPending(gameId); setMsg('flipped — resolving…');
-        await waitBlocks(2);
+        await waitUntilBlock(BigInt(placed.blockNumber) + 2n);
         const rh = await wallet.writeContract({ address: FL, abi: flipAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
-        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh });
+        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh, pollingInterval: 200 });
         const res = parseResolved(rrc, flipAbi, 'FlipResolved');
         if (res) {
           appendSettledBet({ game_bet_id: placed.gameBetId, game: 'coinflip', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
@@ -496,13 +484,13 @@ export default function Casino() {
         }
       } else if (tab === 'dice') {
         const h = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'roll', args: [targetNum, w], gas: GAS_PLACE } as any);
-        const rc = await publicClient!.waitForTransactionReceipt({ hash: h });
+        const rc = await publicClient!.waitForTransactionReceipt({ hash: h, pollingInterval: 200 });
         const placed = parsePlaced(rc, diceAbi, 'RollPlaced');
         gameId = placed.gameBetId;
         setPending(gameId); setMsg('rolled — resolving…');
-        await waitBlocks(2);
+        await waitUntilBlock(BigInt(placed.blockNumber) + 2n);
         const rh = await wallet.writeContract({ address: DI, abi: diceAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
-        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh });
+        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh, pollingInterval: 200 });
         const res = parseResolved(rrc, diceAbi, 'RollResolved');
         if (res) {
           appendSettledBet({ game_bet_id: placed.gameBetId, game: 'dice', player: placed.player, wager: placed.wager, payout: res.payout, status: res.status, block_number: placed.blockNumber });
@@ -512,13 +500,13 @@ export default function Casino() {
         }
       } else {
         const h = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'drop', args: [rows, w], gas: GAS_PLACE } as any);
-        const rc = await publicClient!.waitForTransactionReceipt({ hash: h });
+        const rc = await publicClient!.waitForTransactionReceipt({ hash: h, pollingInterval: 200 });
         const placed = parsePlaced(rc, plinkoAbi, 'DropPlaced');
         gameId = placed.gameBetId;
         setPending(gameId); setMsg('dropped — resolving…');
-        await waitBlocks(2);
+        await waitUntilBlock(BigInt(placed.blockNumber) + 2n);
         const rh = await wallet.writeContract({ address: PL, abi: plinkoAbi, functionName: 'resolve', args: [gameId], gas: GAS_RESOLVE } as any);
-        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh });
+        const rrc = await publicClient!.waitForTransactionReceipt({ hash: rh, pollingInterval: 200 });
         const res = parseResolved(rrc, plinkoAbi, 'DropResolved');
         if (res) {
           // Same bit-path replay as the relayer: recompute the contract's
