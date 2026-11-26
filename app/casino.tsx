@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAccount, usePublicClient, useReadContract, useSwitchChain, useWalletClient } from 'wagmi';
 import { parseEther, formatEther, parseEventLogs, encodeFunctionData, maxUint256 } from 'viem';
-import { baseSepolia } from 'viem/chains';
+import { arbitrumSepolia } from 'viem/chains';
 import { getSessionAccount, metaDigest, forwarderAbi, SESSION_DAYS } from '../lib/session';
 import { humanizeError } from '../lib/revert';
 import { derivePlinkoPath, PLINKO_MULT_BPS, multLabel } from '../lib/plinko-path';
@@ -18,16 +18,16 @@ import BetAnimation, { type BetAnimationState } from './bet-animation';
 
 const T = (process.env.NEXT_PUBLIC_TOKEN || '0x79d782ffb87a643b9c5369f54f0c1fca02f40a89') as `0x${string}`;
 const TR = (process.env.NEXT_PUBLIC_TREASURY || '0xa84a9505753e0be52486e181bd9dde77d261ad56') as `0x${string}`;
-const FL = (process.env.NEXT_PUBLIC_COINFLIP || '0xAF7fDDa566905860D6BF3AdB4cd73Dc771Fab366') as `0x${string}`;
-const DI = (process.env.NEXT_PUBLIC_DICE || '0xfC1dB725d0dEd61618E76152610c39147B42eff7') as `0x${string}`;
-const PL = (process.env.NEXT_PUBLIC_PLINKO || '0xdDe34251ad0E1EeD50602680FACdA3e4C66E7f08') as `0x${string}`;
-const FW = (process.env.NEXT_PUBLIC_FORWARDER || '0x0FA6F0693cd56D6dE6DD0297C75CCf41FafCbda7') as `0x${string}`;
-// Fallbacks = the deployed Base Sepolia addresses (broadcast/*/84532 in the
+const FL = (process.env.NEXT_PUBLIC_COINFLIP || '0xdccba84d53bf3daa275f57ca7e81b202892efc14') as `0x${string}`;
+const DI = (process.env.NEXT_PUBLIC_DICE || '0xdde34251ad0e1eed50602680facda3e4c66e7f08') as `0x${string}`;
+const PL = (process.env.NEXT_PUBLIC_PLINKO || '0x4473a610e79a66e5ca9a805cb2af42758bfa1b3e') as `0x${string}`;
+const FW = (process.env.NEXT_PUBLIC_FORWARDER || '0x22157527b27c4e3174215126c100f66b041cf082') as `0x${string}`;
+// Fallbacks = the deployed Arbitrum Sepolia addresses (broadcast/*/421614 in the
 // contracts repo). Without them a missing NEXT_PUBLIC_* env var made T/TR/…
 // '' and writeContract sent approve calldata with an empty `to` — MetaMask
 // interprets that as a contract CREATION and the tx runs out of gas.
 
-// Explicit gas limits, measured from real Base Sepolia receipts (approve 128k,
+// Explicit gas limits, measured from real Arbitrum Sepolia receipts (approve 128k,
 // place 1.09–1.18M, resolve 335–539k) with headroom. Without them the
 // wallet must estimate gas itself — OKX frequently fails that step with
 // "network fee estimation unsuccessful" even though the tx is valid.
@@ -57,13 +57,13 @@ const S = {
 export default function Casino() {
   const { address, isConnected, chainId } = useAccount();
   const { switchChain, isPending: isSwitching } = useSwitchChain();
-  const wrongChain = isConnected && chainId !== baseSepolia.id;
+  const wrongChain = isConnected && chainId !== arbitrumSepolia.id;
 
   // Wallet connects on whatever chain it was left on (often mainnet).
-  // Auto-switch to Base Sepolia so writes don't fail the chain check.
+  // Auto-switch to Arbitrum Sepolia so writes don't fail the chain check.
   useEffect(() => {
     if (wrongChain) {
-      switchChain({ chainId: baseSepolia.id });
+      switchChain({ chainId: arbitrumSepolia.id });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wrongChain]);
@@ -327,8 +327,8 @@ export default function Casino() {
       return;
     }
     if (wrongChain) {
-      setMsg('switching to Base Sepolia first…');
-      switchChain({ chainId: baseSepolia.id });
+      setMsg('switching to Arbitrum Sepolia first…');
+      switchChain({ chainId: arbitrumSepolia.id });
       return;
     }
     setMsg('');
@@ -545,9 +545,9 @@ export default function Casino() {
       </div>
       {wrongChain && (
         <div style={{ background: '#4a2b00', border: '1px solid #b97a1a', padding: 12, borderRadius: 10, marginTop: 12 }}>
-          ⚠️ Wallet is on chain {chainId} (mainnet) — this casino runs on <b>Base Sepolia</b>.{' '}
-          <button style={S.btn} disabled={isSwitching} onClick={() => switchChain({ chainId: baseSepolia.id })}>
-            {isSwitching ? 'switching…' : 'Switch to Base Sepolia'}
+          ⚠️ Wallet is on chain {chainId} (mainnet) — this casino runs on <b>Arbitrum Sepolia</b>.{' '}
+          <button style={S.btn} disabled={isSwitching} onClick={() => switchChain({ chainId: arbitrumSepolia.id })}>
+            {isSwitching ? 'switching…' : 'Switch to Arbitrum Sepolia'}
           </button>
         </div>
       )}

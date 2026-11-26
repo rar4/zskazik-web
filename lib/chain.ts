@@ -1,30 +1,34 @@
 import { createPublicClient, fallback, http, parseAbiItem } from 'viem';
 
-export const RPC_URL = process.env.RPC_URL || 'https://sepolia.base.org';
-export const START_BLOCK = BigInt(process.env.START_BLOCK || '61788600');
+export const RPC_URL = process.env.RPC_URL || 'https://sepolia-rollup.arbitrum.io/rpc';
+export const START_BLOCK = BigInt(process.env.START_BLOCK || '332881300');
 
-// Fallbacks = deployed Base Sepolia addresses (broadcast/*/84532 in the
+// Fallbacks = deployed Arbitrum Sepolia addresses (broadcast/*/421614 in the
 // contracts repo) — a missing env var must never silently zero these out.
 export const ADDR = {
   token: (process.env.NEXT_PUBLIC_TOKEN || '0x79d782ffb87a643b9c5369f54f0c1fca02f40a89') as `0x${string}`,
   treasury: (process.env.NEXT_PUBLIC_TREASURY || '0xa84a9505753e0be52486e181bd9dde77d261ad56') as `0x${string}`,
-  coinflip: (process.env.NEXT_PUBLIC_COINFLIP || '0xAF7fDDa566905860D6BF3AdB4cd73Dc771Fab366') as `0x${string}`,
-  dice: (process.env.NEXT_PUBLIC_DICE || '0xfC1dB725d0dEd61618E76152610c39147B42eff7') as `0x${string}`,
-  plinko: (process.env.NEXT_PUBLIC_PLINKO || '0xdDe34251ad0E1EeD50602680FACdA3e4C66E7f08') as `0x${string}`,
-  forwarder: (process.env.NEXT_PUBLIC_FORWARDER || '0x0FA6F0693cd56D6dE6DD0297C75CCf41FafCbda7') as `0x${string}`,
+  coinflip: (process.env.NEXT_PUBLIC_COINFLIP || '0xdccba84d53bf3daa275f57ca7e81b202892efc14') as `0x${string}`,
+  dice: (process.env.NEXT_PUBLIC_DICE || '0xdde34251ad0e1eed50602680facda3e4c66e7f08') as `0x${string}`,
+  plinko: (process.env.NEXT_PUBLIC_PLINKO || '0x4473a610e79a66e5ca9a805cb2af42758bfa1b3e') as `0x${string}`,
+  forwarder: (process.env.NEXT_PUBLIC_FORWARDER || '0x22157527b27c4e3174215126c100f66b041cf082') as `0x${string}`,
 };
 
 export function isZeroAddr(a: string) {
   return !a || a === '0x0000000000000000000000000000000000000000';
 }
 
-// Base Sepolia has two game generations: the first deployment (direct
+// Arbitrum Sepolia has two game generations: the first deployment (direct
 // bets, before the ERC-2771 forwarder) and the current forwarder-enabled
 // one. History scans both so old bets stay visible after redeploys.
+// Fresh Arbitrum deployment: no previous generation on this chain. The old
+// Base addresses must NOT be scanned here — CREATE nonces collide across
+// chains, so the Base dice/plinko addresses equal the new Arbitrum
+// coinflip/dice addresses and scanning both would double-count bets.
 export const ADDR_OLD = {
-  coinflip: '0x22157527B27C4E3174215126c100f66B041cF082' as `0x${string}`,
-  dice: '0xDcCBA84D53BF3daa275f57cA7e81b202892EfC14' as `0x${string}`,
-  plinko: '0x1a2a89BFDD940B34f62237b6cCb4b8D2644a37cD' as `0x${string}`,
+  coinflip: '0x0000000000000000000000000000000000000000' as `0x${string}`,
+  dice: '0x0000000000000000000000000000000000000000' as `0x${string}`,
+  plinko: '0x0000000000000000000000000000000000000000' as `0x${string}`,
 };
 
 export const client = createPublicClient({
@@ -33,18 +37,17 @@ export const client = createPublicClient({
   // not on the chain (2s blocks). 200ms caps the average detection lag
   // at ~100ms per wait (3 waits per bet) without hammering the RPC.
   pollingInterval: 200,
-  // Fallback across public Base Sepolia endpoints: single-endpoint scans
+  // Fallback across public Arbitrum Sepolia endpoints: single-endpoint scans
   // intermittently return partial/empty log pages (lagging or throttled
   // backends). viem's fallback transport moves to the next URL on error.
   // RPC_URL (Alchemy in prod) leads: the free public endpoints return
   // empty pages under concurrent scan load, which used to stall history.
-  // sepolia.base.org caps eth_getLogs at a 200-block range, which breaks
-  // 40k-block history scans, so it is last resort only.
+  // the official RPC is the last resort only.
   transport: fallback(
     [
       RPC_URL,
-      'https://base-sepolia-rpc.publicnode.com',
-      'https://sepolia.base.org',
+      'https://arbitrum-sepolia-rpc.publicnode.com',
+      'https://sepolia-rollup.arbitrum.io/rpc',
     ]
       .filter((u, i, a) => a.indexOf(u) === i)
       // 4s, not 10s: publicnode answers in ~300ms when healthy. A hung

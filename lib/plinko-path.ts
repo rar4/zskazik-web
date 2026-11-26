@@ -1,10 +1,17 @@
 import { concat, keccak256, type Hex } from 'viem';
 
 // Bit-path replay for Plinko: the contract decides the game as
-//   word = keccak256(abi.encode(treasuryBetId, block.prevrandao, placeBlock))
+//   word = keccak256(abi.encode(treasuryBetId, randomnessWord, placeBlock))
 //   treasuryBetId = keccak256(abi.encode(contract, gameBetId))
 //   bit i of word = bounce RIGHT at row i; bin = popcount(bits[0..rows))
 // (Plinko.sol resolve(), GameBase.sol _random/_nextIds.)
+// randomnessWord is chain-dependent (GameBase._randomWord):
+//   Arbitrum: ArbSys.arbBlockHash(resolveL2Block - 1) — block.prevrandao is
+//   the constant 1 on Arbitrum Nitro and must not be used. placeBlock is
+//   the L2 block number (ArbSys.arbBlockNumber), not block.number (which
+//   is the L1 block number on Arbitrum).
+//   Other chains: block.prevrandao of the resolve block (OP Stack exposes
+//   it as the header mixHash).
 // The animator replays those exact bits, so the ball's trajectory is a
 // pure function of on-chain data and cannot diverge from the payout.
 // When the contract moves to Chainlink VRF the word source changes but
@@ -59,7 +66,20 @@ export function pathFromWord(word: Hex, rows: number): PlinkoPath {
 
 type BlockClient = {
   getBlock: (args: { blockNumber: bigint }) => Promise<{ prevRandao?: Hex; prevrandao?: Hex; mixHash?: Hex }>;
+  readContract?: (args: any) => Promise<any>;
 };
+
+/** Arbitrum system contract (ArbSys) — arbBlockHash(l2BlockNumber). */
+export const ARB_SYS_ADDRESS = '0x0000000000000000000000000000000000000064' as const;
+const arbSysAbi = [
+  {
+    type: 'function',
+    name: 'arbBlockHash',
+    stateMutability: 'view',
+    inputs: [{ name: 'blockNum', type: 'uint256' }],
+    outputs: [{ name: '', type: 'bytes32' }],
+  },
+] as const;
 
 /** Recompute the exact path the contract used, from chain data only. */
 export async function derivePlinkoPath(
@@ -70,6 +90,27 @@ export async function derivePlinkoPath(
   resolveBlock: number,
   rows: number,
 ): Promise<PlinkoPath> {
+  // Arbitrum first: GameBase._randomWord uses ArbSys.arbBlockHash of the
+  // block before the resolve block (its _l2BlockNumber() at execution is
+  // the resolve block). prevrandao is constant 1 on Arbitrum, so the
+  // header value must not be used there. A zero hash means the precompile
+  // is absent (Base/anvil) — fall through to the prevrandao path.
+  if (client.readContract && resolveBlock > 0) {
+    try {
+      const h = (await client.readContract({
+        address: ARB_SYS_ADDRESS,
+        abi: arbSysAbi,
+        functionName: 'arbBlockHash',
+        args: [BigInt(resolveBlock - 1)],
+      })) as Hex;
+      if (h && h !== ('0x' + '0'.repeat(64)) as Hex) {
+        const word = randomWordFor(treasuryBetIdFor(contract, gameBetId), h, placeBlock);
+        return pathFromWord(word, rows);
+      }
+    } catch {
+      // Not an Arbitrum chain / call failed — try the header path below.
+    }
+  }
   const block = await client.getBlock({ blockNumber: BigInt(resolveBlock) });
   // OP Stack: block.prevrandao in Solidity reads the header mixHash, and
   // viem exposes it as `mixHash` (there is no prevRandao field on these

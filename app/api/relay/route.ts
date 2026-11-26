@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createWalletClient, http, parseAbi, parseEventLogs, encodeFunctionData, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { baseSepolia } from 'viem/chains';
+import { arbitrumSepolia } from 'viem/chains';
 import { ADDR, client } from '@/lib/chain';
 import { derivePlinkoPath } from '@/lib/plinko-path';
 import { recordBet } from '@/lib/store';
@@ -42,15 +42,14 @@ const GAME_BY_ADDR: Record<string, string> = {
 const GAS_PLACE = 1_500_000n;
 const GAS_RESOLVE = 800_000n;
 
-// Fast RPC for the relayer: publicnode allows wide getLogs ranges and is
-// low-latency; sepolia.base.org caps getLogs at 200 blocks.
-const RPC = 'https://base-sepolia-rpc.publicnode.com';
+// Fast RPC for the relayer: publicnode allows wide getLogs ranges and is low-latency.
+const RPC = 'https://arbitrum-sepolia-rpc.publicnode.com';
 
 function relayer() {
   const pk = process.env.RELAYER_PRIVATE_KEY;
   if (!pk) throw new Error('RELAYER_PRIVATE_KEY not configured');
   const account = privateKeyToAccount(pk as Hex);
-  return createWalletClient({ account, chain: baseSepolia, transport: http(RPC) });
+  return createWalletClient({ account, chain: arbitrumSepolia, transport: http(RPC) });
 }
 
 export async function POST(req: Request) {
