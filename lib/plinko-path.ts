@@ -71,7 +71,7 @@ type BlockClient = {
 
 /** Arbitrum system contract (ArbSys) — arbBlockHash(l2BlockNumber). */
 export const ARB_SYS_ADDRESS = '0x0000000000000000000000000000000000000064' as const;
-const arbSysAbi = [
+export const arbSysAbi = [
   {
     type: 'function',
     name: 'arbBlockHash',
@@ -89,7 +89,14 @@ export async function derivePlinkoPath(
   placeBlock: number,
   resolveBlock: number,
   rows: number,
+  prefetched?: { resolveBlock: number; hash: Hex } | null,
 ): Promise<PlinkoPath> {
+  // Prefetched hash (relay overlaps this fetch with resolve inclusion):
+  // valid only when it is exactly arbBlockHash(resolveBlock - 1).
+  if (prefetched && prefetched.resolveBlock === resolveBlock && prefetched.hash !== ('0x' + '0'.repeat(64)) as Hex) {
+    const word = randomWordFor(treasuryBetIdFor(contract, gameBetId), prefetched.hash, placeBlock);
+    return pathFromWord(word, rows);
+  }
   // Arbitrum first: GameBase._randomWord uses ArbSys.arbBlockHash of the
   // block before the resolve block (its _l2BlockNumber() at execution is
   // the resolve block). prevrandao is constant 1 on Arbitrum, so the

@@ -3,7 +3,7 @@ import { createWalletClient, http, parseAbi, parseEventLogs, type Hex } from 'vi
 import { privateKeyToAccount } from 'viem/accounts';
 import { arbitrumSepolia } from 'viem/chains';
 import { ADDR, client } from '@/lib/chain';
-import { derivePlinkoPath } from '@/lib/plinko-path';
+import { derivePlinkoPath, ARB_SYS_ADDRESS, arbSysAbi } from '@/lib/plinko-path';
 import { recordBet } from '@/lib/store';
 import { humanizeError } from '@/lib/revert';
 
@@ -116,6 +116,17 @@ export async function POST(req: Request) {
       // which satisfies _requireResolvable (block.number > placeBlock)
       // without burning a full 2s block waiting for place+1 to mine first.
       // That wait cost one whole block per bet.
+      // Prefetch the expected randomness hash in parallel with resolve
+      // inclusion: if resolve lands at place+1 (the usual case), its word
+      // source is arbBlockHash(placeBlock), already known now. This
+      // overlaps the derivation RPC with the ~800ms resolve wait instead
+      // of paying it serially after resolve mined.
+      const hashPromise = (client as any).readContract({
+        address: ARB_SYS_ADDRESS,
+        abi: arbSysAbi,
+        functionName: 'arbBlockHash',
+        args: [receipt.blockNumber],
+      }).catch(() => null) as Promise<Hex | null>;
       mark('resolveReady');
       resolveHash = await wallet.writeContract({
         address: target,
@@ -147,6 +158,11 @@ export async function POST(req: Request) {
         // a path that disagrees with the payout.
         if (resolved.eventName === 'DropResolved' && details?.bin !== undefined) {
           try {
+            const prefetchedHash = await hashPromise;
+            const prefetched =
+              prefetchedHash && Number(resolveReceipt.blockNumber) === Number(receipt.blockNumber) + 1
+                ? { resolveBlock: Number(resolveReceipt.blockNumber), hash: prefetchedHash }
+                : null;
             const path = await derivePlinkoPath(
               client as any,
               String(target),
@@ -154,6 +170,7 @@ export async function POST(req: Request) {
               Number(receipt.blockNumber),
               Number(resolveReceipt.blockNumber),
               Number(placed.args.rows),
+              prefetched,
             );
             if (path.bin === details.bin) {
               details.path = path.bits;

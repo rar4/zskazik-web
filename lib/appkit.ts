@@ -15,7 +15,7 @@ export const appKitEnabled = Boolean(projectId);
 
 const rpc =
   process.env.NEXT_PUBLIC_RPC_URL ||
-  'https://sepolia-rollup.arbitrum.io/rpc';
+  'https://arbitrum-sepolia-rpc.publicnode.com';
 
 // Public origin of this app. Must match the domain allowlisted in the Reown
 // dashboard, otherwise WalletConnect universal links/deep links refuse to open.

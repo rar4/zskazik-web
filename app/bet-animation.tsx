@@ -48,7 +48,7 @@ export default function BetAnimation({ animation, onClose }: { animation: BetAni
   useEffect(() => {
     if (animation.game !== 'plinko' || !rawResultEarly || overlayPhaseRef.current !== 'loading') return;
     setOverlayPhase('fading');
-    const t = setTimeout(() => setOverlayPhase('gone'), 450);
+    const t = setTimeout(() => setOverlayPhase('gone'), 250);
     return () => clearTimeout(t);
   }, [rawResultEarly, animation.game]);
 
@@ -199,7 +199,7 @@ export default function BetAnimation({ animation, onClose }: { animation: BetAni
             color: '#f4f6ff',
             background: 'radial-gradient(circle at 50% 22%, rgba(108,92,231,.42), transparent 42%), linear-gradient(180deg, rgba(7,9,20,.99), rgba(11,14,23,.99))',
             opacity: overlayPhase === 'fading' ? 0 : 1,
-            transition: 'opacity .45s ease-out',
+            transition: 'opacity .25s ease-out',
             pointerEvents: overlayPhase === 'fading' ? 'none' : 'auto',
             animation: 'zsk-load-fade .4s ease-out',
           }}

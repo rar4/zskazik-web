@@ -1,6 +1,6 @@
 import { createPublicClient, fallback, http, parseAbiItem } from 'viem';
 
-export const RPC_URL = process.env.RPC_URL || 'https://sepolia-rollup.arbitrum.io/rpc';
+export const RPC_URL = process.env.RPC_URL || 'https://arbitrum-sepolia-rpc.publicnode.com';
 export const START_BLOCK = BigInt(process.env.START_BLOCK || '332881300');
 
 // Fallbacks = deployed Arbitrum Sepolia addresses (broadcast/*/421614 in the
